@@ -8,6 +8,7 @@
 #include <LemonadeNexus/Core/GenesisAnchor.hpp>
 #include <LemonadeNexus/Core/OnboardingClient.hpp>
 #include <LemonadeNexus/Security/Attestation/ReleaseApproval.hpp>
+#include <LemonadeNexus/Security/EvidenceOperatorEnrolled.hpp>
 #include <LemonadeNexus/Security/Genesis/BootstrapCertificate.hpp>
 #include <LemonadeNexus/Security/PlatformProbe.hpp>
 #include <LemonadeNexus/Security/Policy/SecurityConstants.hpp>
@@ -18,6 +19,7 @@
 #include <LemonadeNexus/Tree/TreeLog.hpp>
 #include <LemonadeNexus/Tree/TreeMerge.hpp>
 
+#include <sodium.h>
 #include <spdlog/spdlog.h>
 #include <nlohmann/json.hpp>
 
@@ -612,8 +614,117 @@ std::optional<InitResult> ensure_initialized(const ServerConfig& config) {
     return result;
 }
 
+// --- Operator trust: key generation and per-server enrollment ---------------
+// OPERATOR TRUST, NOT HARDWARE TRUST (docs/Operator-Trust.md). These modes run
+// in every build so an operator can prepare enrollments on any machine; only an
+// OPERATOR_TRUST build verifies them.
+
+int run_operator_keygen(const ServerConfig& config) {
+    nexus::crypto::Ed25519Keypair kp;
+    crypto_sign_keypair(kp.public_key.data(), kp.private_key.data());
+    nlohmann::json j;
+    j["kind"] = "lemonade-nexus-operator-root:v1";
+    j["public_key_b64"] = crypto::to_base64(kp.public_key);
+    j["private_key_b64"] = crypto::to_base64(kp.private_key);
+    const std::filesystem::path path{config.operator_keygen_path};
+    std::error_code ec;
+    if (std::filesystem::exists(path, ec)) {
+        spdlog::error("--operator-keygen: {} exists; refusing to overwrite a root key", path.string());
+        return 1;
+    }
+    {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            spdlog::error("--operator-keygen: cannot write {}", path.string());
+            return 1;
+        }
+        out << j.dump(2) << "\n";
+    }
+    std::filesystem::permissions(path, std::filesystem::perms::owner_read |
+                                           std::filesystem::perms::owner_write,
+                                 std::filesystem::perm_options::replace, ec);
+    sodium_memzero(kp.private_key.data(), kp.private_key.size());
+    // The private key is never printed. The public key is what every server
+    // pins as operator_root_pubkey.
+    std::printf("operator root public key (base64): %s\n", j["public_key_b64"].get<std::string>().c_str());
+    std::printf("keypair written to %s (mode 0600). Keep it off the servers.\n", path.string().c_str());
+    return 0;
+}
+
+int run_operator_enroll(const ServerConfig& config) {
+    using namespace nexus::security;
+    if (config.operator_enroll_keyfile.empty()) {
+        spdlog::error("--operator-enroll needs --operator-keyfile <file>");
+        return 1;
+    }
+    const auto anchor = load_genesis_anchor(config.genesis_pubkey);
+    if (!anchor) {
+        spdlog::error("--operator-enroll needs genesis_pubkey (config or --genesis-pubkey): the "
+                      "enrollment binds to the network id derived from it");
+        return 1;
+    }
+    std::ifstream in(config.operator_enroll_keyfile);
+    if (!in) {
+        spdlog::error("--operator-enroll: cannot read {}", config.operator_enroll_keyfile);
+        return 1;
+    }
+    const auto keyfile = nlohmann::json::parse(in, nullptr, false);
+    if (keyfile.is_discarded() || keyfile.value("kind", "") != "lemonade-nexus-operator-root:v1") {
+        spdlog::error("--operator-enroll: {} is not an operator root keypair file",
+                      config.operator_enroll_keyfile);
+        return 1;
+    }
+    nexus::crypto::Ed25519Keypair kp;
+    const auto pub = crypto::from_base64(keyfile.value("public_key_b64", ""));
+    const auto priv = crypto::from_base64(keyfile.value("private_key_b64", ""));
+    if (pub.size() != kp.public_key.size() || priv.size() != kp.private_key.size()) {
+        spdlog::error("--operator-enroll: malformed operator keypair file");
+        return 1;
+    }
+    std::copy(pub.begin(), pub.end(), kp.public_key.begin());
+    std::copy(priv.begin(), priv.end(), kp.private_key.begin());
+
+    const auto node = crypto::from_base64(config.operator_enroll_node_pubkey);
+    OperatorEnrollment enrollment;
+    if (node.size() != enrollment.node_key.size()) {
+        spdlog::error("--operator-enroll: the node key must be a base64 Ed25519 public key (the "
+                      "server's Gossip pubkey from --first-run)");
+        return 1;
+    }
+    std::copy(node.begin(), node.end(), enrollment.node_key.begin());
+    enrollment.network_id = anchor->network_id;
+    enrollment.binary_sha256 = config.operator_enroll_binary_sha256;
+    if (!enrollment.binary_sha256.empty() &&
+        (enrollment.binary_sha256.size() != 64 ||
+         enrollment.binary_sha256.find_first_not_of("0123456789abcdef") != std::string::npos)) {
+        spdlog::error("--operator-binary-sha256 must be 64 lowercase hex characters");
+        return 1;
+    }
+    enrollment.issued_at_unix = static_cast<uint64_t>(now_unix());
+    const auto signed_enrollment = sign_operator_enrollment(enrollment, kp);
+    sodium_memzero(kp.private_key.data(), kp.private_key.size());
+    const std::string text = encode_operator_enrollment(signed_enrollment) + "\n";
+    if (config.operator_enroll_out.empty()) {
+        std::fputs(text.c_str(), stdout);
+    } else {
+        const std::filesystem::path out_path{config.operator_enroll_out};
+        std::error_code ec;
+        std::filesystem::create_directories(out_path.parent_path(), ec);
+        std::ofstream out(out_path, std::ios::binary | std::ios::trunc);
+        if (!out) {
+            spdlog::error("--operator-enroll: cannot write {}", out_path.string());
+            return 1;
+        }
+        out << text;
+        std::printf("operator enrollment written to %s\n", out_path.string().c_str());
+    }
+    return 0;
+}
+
 std::optional<int> run_cli_mode(ServerConfig& config, const char* argv0,
                                 const security::SealBackend& seal_backend) {
+    if (!config.operator_keygen_path.empty())     return run_operator_keygen(config);
+    if (!config.operator_enroll_node_pubkey.empty()) return run_operator_enroll(config);
     if (config.verify_platform)                   return run_verify_platform(config);
     if (config.first_run)                         return run_first_run(config);
     if (config.onboard_server)                    return run_onboard_server(config, seal_backend);

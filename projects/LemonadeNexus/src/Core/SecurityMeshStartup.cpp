@@ -53,6 +53,24 @@ std::optional<SecurityMeshStartup> start_security_mesh(
     } else {
         spdlog::warn("Tier-1 release approval unavailable: {}", anchor->release_error);
     }
+#if defined(NEXUS_OPERATOR_TRUST) && NEXUS_OPERATOR_TRUST
+    // OPERATOR TRUST, NOT HARDWARE TRUST. This build issues Tier 1 challenges
+    // under AttestationProfileId::OperatorEnrolled; the pinned operator root
+    // key is the whole platform policy. docs/Operator-Trust.md.
+    if (config.operator_root_pubkey.empty()) {
+        spdlog::warn("OPERATOR TRUST build without operator_root_pubkey: no node can reach Tier 1");
+    } else {
+        mesh_config.profile.operator_root_pubkey_b64 = config.operator_root_pubkey;
+        mesh_config.profile.operator_approved_binaries_hex = config.operator_approved_binaries;
+        spdlog::warn("OPERATOR TRUST: Tier 1 under operator enrollment (root {}...), not hardware "
+                     "attestation; {} binary pin(s)",
+                     config.operator_root_pubkey.substr(0, 8), config.operator_approved_binaries.size());
+    }
+#else
+    if (!config.operator_root_pubkey.empty()) {
+        spdlog::warn("operator_root_pubkey is set but this build has no operator-trust provider; ignored");
+    }
+#endif
     if (!security::profile_is_complete(mesh_config.profile)) {
         for (const auto gap : security::profile_gaps(mesh_config.profile)) {
             spdlog::warn("Attestation profile v{} is incomplete: {}",
