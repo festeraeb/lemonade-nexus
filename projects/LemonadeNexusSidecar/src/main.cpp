@@ -449,9 +449,26 @@ int main(int argc, char* argv[]) {
         for (const auto& p : client.get_mesh_peers()) {
             out.push_back({{"node_id", p.node_id}, {"hostname", p.hostname}, {"tunnel_ip", p.tunnel_ip},
                            {"is_online", p.is_online}, {"path", p.path}, {"latency_ms", p.latency_ms},
-                           {"mgmt_pubkey", p.mgmt_pubkey.substr(0, 12)}, {"permissions", p.permissions}});
+                           {"mgmt_pubkey", p.mgmt_pubkey}, {"permissions", p.permissions}});
         }
         res.set_content(out.dump(), "application/json");
+    });
+    // Set one key's assignment on a tree node this device administers:
+    // {"node_id", "pubkey", "permissions": [...]}. The server replaces that key's
+    // entry; an empty list removes it. This is how a service permission such as
+    // svc:nauti-worker is granted when an invite did not carry it.
+    control.Post("/assign", [&](const httplib::Request& req, httplib::Response& res) {
+        auto j = nlohmann::json::parse(req.body, nullptr, false);
+        if (j.is_discarded() || !j.contains("node_id") || !j.contains("pubkey") || !j.contains("permissions")) {
+            res.status = 400;
+            res.set_content(R"({"error":"expected {node_id, pubkey, permissions}"})", "application/json");
+            return;
+        }
+        const nlohmann::json body = {{"pubkey", j.at("pubkey")}, {"permissions", j.at("permissions")}};
+        auto r = client.call_private_api("POST", "/api/tree/node/assignments/" + j.at("node_id").get<std::string>(),
+                                         body.dump());
+        res.status = r.ok ? 200 : 502;
+        res.set_content(r.ok ? r.value : nlohmann::json{{"error", r.error}}.dump(), "application/json");
     });
     control.Post("/link-token", [&](const httplib::Request& req, httplib::Response& res) {
         uint32_t ttl_sec = 600;
