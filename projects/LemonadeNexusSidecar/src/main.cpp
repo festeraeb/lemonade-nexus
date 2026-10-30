@@ -439,10 +439,20 @@ int main(int argc, char* argv[]) {
             {"join_failures", state.join_failures},
             {"server", cfg.host + ":" + std::to_string(cfg.port)},
             {"exposed", exposed},
+            {"mesh_port", mesh_port ? mesh_port->status() : nlohmann::json()},
         };
         res.set_content(j.dump(), "application/json");
     });
     // Mint a device link token so another device can join this account.
+    control.Get("/peers", [&](const httplib::Request&, httplib::Response& res) {
+        nlohmann::json out = nlohmann::json::array();
+        for (const auto& p : client.get_mesh_peers()) {
+            out.push_back({{"node_id", p.node_id}, {"hostname", p.hostname}, {"tunnel_ip", p.tunnel_ip},
+                           {"is_online", p.is_online}, {"path", p.path}, {"latency_ms", p.latency_ms},
+                           {"mgmt_pubkey", p.mgmt_pubkey.substr(0, 12)}, {"permissions", p.permissions}});
+        }
+        res.set_content(out.dump(), "application/json");
+    });
     control.Post("/link-token", [&](const httplib::Request& req, httplib::Response& res) {
         uint32_t ttl_sec = 600;
         if (!req.body.empty()) {
