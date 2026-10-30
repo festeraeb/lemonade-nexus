@@ -3,6 +3,7 @@
 // services to mesh peers, and serves a localhost control API the parent polls.
 
 #include <LemonadeNexusSDK/LemonadeNexusClient.hpp>
+#include <LemonadeNexusSDK/MeshPort.hpp>
 
 #include <httplib.h>
 #include <nlohmann/json.hpp>
@@ -15,7 +16,9 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -102,6 +105,11 @@ struct SidecarConfig {
     bool        pin_server{false};             // keep the configured endpoint (no SEIP switch)
     bool        inference{false};              // join as a Tier 3 inference node (ln_set_inference_node)
     std::string catalog_path;                  // service catalog JSON registered on the first exposed vport
+    std::string genesis_key;                   // base64 Genesis key to pin for Tier 1 verification
+    uint16_t    mesh_port{0};                  // 0 = no mesh port; else 127.0.0.1:<mesh_port> serves the group
+    std::string mesh_local;                    // local Lemonade URL the mesh port serves as "local"
+    std::string mesh_selection{"auto"};        // local | auto | <node id>
+    std::string link_token_out;                // after the join, mint an invite for this group and write it here (0600)
 };
 
 std::optional<ExposeMapping> parse_expose(const std::string& spec) {
@@ -135,6 +143,11 @@ void apply_json_config(SidecarConfig& cfg, const nlohmann::json& j) {
     if (j.contains("log_level"))    cfg.log_level     = j.at("log_level").get<std::string>();
     if (j.contains("inference"))    cfg.inference     = j.at("inference").get<bool>();
     if (j.contains("catalog"))      cfg.catalog_path  = j.at("catalog").get<std::string>();
+    if (j.contains("genesis_key"))  cfg.genesis_key   = j.at("genesis_key").get<std::string>();
+    if (j.contains("mesh_port"))    cfg.mesh_port     = j.at("mesh_port").get<uint16_t>();
+    if (j.contains("mesh_local"))   cfg.mesh_local    = j.at("mesh_local").get<std::string>();
+    if (j.contains("mesh_selection")) cfg.mesh_selection = j.at("mesh_selection").get<std::string>();
+    if (j.contains("link_token_out")) cfg.link_token_out = j.at("link_token_out").get<std::string>();
     if (j.contains("expose") && j.at("expose").is_array()) {
         for (const auto& e : j.at("expose")) {
             if (auto m = parse_expose(e.get<std::string>())) cfg.exposes.push_back(*m);
@@ -184,6 +197,11 @@ void print_usage(const char* prog) {
         "                          pair with --expose 13305:<lemond port>\n"
         "  --catalog <path>        Service catalog JSON to register on the first --expose vport, so\n"
         "                          svc:<family> permissions gate the exposed service\n"
+        "  --genesis-key <b64>     Pin the network's Genesis key (Tier 1 verification)\n"
+        "  --mesh-port <N>         Serve this device's group on 127.0.0.1:N (the mesh port)\n"
+        "  --mesh-local <url>      Local Lemonade URL the mesh port serves as 'local'\n"
+        "  --mesh-selection <sel>  local | auto | <node id> (default auto)\n"
+        "  --link-token-out <path> After joining, mint a 1 h invite for this group and write it to <path> (0600)\n"
         "  --control-port <N>      Localhost control API port (default 9110)\n"
         "  --control-token <tok>   Bearer required by all control endpoints (API off if unset)\n"
         "  --parent-pid <pid>      Exit when this process disappears\n"
@@ -260,6 +278,16 @@ SidecarConfig load_config(int argc, char* argv[], bool& want_exit) {
             cfg.inference = true;
         } else if (const char* v10 = next("--catalog")) {
             cfg.catalog_path = v10;
+        } else if (const char* v11 = next("--genesis-key")) {
+            cfg.genesis_key = v11;
+        } else if (const char* v12 = next("--mesh-port")) {
+            cfg.mesh_port = static_cast<uint16_t>(std::atoi(v12));
+        } else if (const char* v13 = next("--mesh-local")) {
+            cfg.mesh_local = v13;
+        } else if (const char* v14 = next("--mesh-selection")) {
+            cfg.mesh_selection = v14;
+        } else if (const char* v15 = next("--link-token-out")) {
+            cfg.link_token_out = v15;
         } else if (next("--config")) {
             // already handled
         }
@@ -325,6 +353,14 @@ int main(int argc, char* argv[]) {
         client.set_inference_node(true);
         spdlog::info("Joining as a Tier 3 inference node");
     }
+    if (!cfg.genesis_key.empty()) {
+        auto g = client.set_genesis_key(cfg.genesis_key);
+        if (!g.ok) {
+            spdlog::error("--genesis-key: {}", g.error);
+            return 1;
+        }
+    }
+    std::unique_ptr<lnsdk::MeshPort> mesh_port;
     nlohmann::json catalog_json;  // empty = none
     if (!cfg.catalog_path.empty()) {
         std::ifstream cin(cfg.catalog_path);
@@ -510,6 +546,36 @@ int main(int argc, char* argv[]) {
                     } else {
                         spdlog::warn("Failed to expose :{} -> 127.0.0.1:{}: {}",
                                      e.vport, e.local_port, r.error);
+                    }
+                }
+                if (!cfg.link_token_out.empty()) {
+                    auto inv = client.create_link_token(3600);
+                    if (inv.ok) {
+                        std::ofstream out(cfg.link_token_out, std::ios::trunc);
+                        out << inv.value.dump() << "\n";
+                        out.close();
+                        std::error_code ec;
+                        std::filesystem::permissions(cfg.link_token_out,
+                            std::filesystem::perms::owner_read | std::filesystem::perms::owner_write,
+                            std::filesystem::perm_options::replace, ec);
+                        spdlog::info("Invite for this group written to {} (expires_at {})",
+                                     cfg.link_token_out,
+                                     inv.value.contains("expires_at") ? inv.value["expires_at"].dump() : "?");
+                    } else {
+                        spdlog::warn("create_link_token failed: {}", inv.error);
+                    }
+                }
+                if (cfg.mesh_port != 0 && !mesh_port) {
+                    mesh_port = std::make_unique<lnsdk::MeshPort>(lnsdk::make_mesh_port_backend(client));
+                    const auto rc = mesh_port->start(cfg.mesh_port, cfg.mesh_local);
+                    if (rc == lnsdk::MeshPortStartResult::Ok) {
+                        const int sel = mesh_port->set_selection(cfg.mesh_selection, "");
+                        spdlog::info("Mesh port on 127.0.0.1:{} (local {}), selection '{}' -> {}",
+                                     cfg.mesh_port, cfg.mesh_local, cfg.mesh_selection, sel);
+                    } else {
+                        spdlog::error("Mesh port on 127.0.0.1:{} failed to start (code {})",
+                                      cfg.mesh_port, static_cast<int>(rc));
+                        mesh_port.reset();
                     }
                 }
                 set_status("running");
