@@ -110,6 +110,7 @@ struct SidecarConfig {
     std::string mesh_local;                    // local Lemonade URL the mesh port serves as "local"
     std::string mesh_selection{"auto"};        // local | auto | <node id>
     std::string link_token_out;                // after the join, mint an invite for this group and write it here (0600)
+    std::vector<std::string> link_token_perms; // permissions that invite grants (default: the server's default set)
 };
 
 std::optional<ExposeMapping> parse_expose(const std::string& spec) {
@@ -148,6 +149,8 @@ void apply_json_config(SidecarConfig& cfg, const nlohmann::json& j) {
     if (j.contains("mesh_local"))   cfg.mesh_local    = j.at("mesh_local").get<std::string>();
     if (j.contains("mesh_selection")) cfg.mesh_selection = j.at("mesh_selection").get<std::string>();
     if (j.contains("link_token_out")) cfg.link_token_out = j.at("link_token_out").get<std::string>();
+    if (j.contains("link_token_perms") && j.at("link_token_perms").is_array())
+        cfg.link_token_perms = j.at("link_token_perms").get<std::vector<std::string>>();
     if (j.contains("expose") && j.at("expose").is_array()) {
         for (const auto& e : j.at("expose")) {
             if (auto m = parse_expose(e.get<std::string>())) cfg.exposes.push_back(*m);
@@ -549,7 +552,7 @@ int main(int argc, char* argv[]) {
                     }
                 }
                 if (!cfg.link_token_out.empty()) {
-                    auto inv = client.create_link_token(3600);
+                    auto inv = client.create_link_token(3600, "", cfg.link_token_perms);
                     if (inv.ok) {
                         std::ofstream out(cfg.link_token_out, std::ios::trunc);
                         out << inv.value.dump() << "\n";
