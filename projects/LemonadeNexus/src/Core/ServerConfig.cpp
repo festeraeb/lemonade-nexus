@@ -144,6 +144,8 @@ void from_json(const json& j, ServerConfig& c) {
     if (j.contains("dns_base_domain"))     j.at("dns_base_domain").get_to(c.dns_base_domain);
     if (j.contains("dns_ns_hostname"))     j.at("dns_ns_hostname").get_to(c.dns_ns_hostname);
     if (j.contains("release_signing_pubkey"))     j.at("release_signing_pubkey").get_to(c.release_signing_pubkey);
+    if (j.contains("operator_root_pubkey"))       j.at("operator_root_pubkey").get_to(c.operator_root_pubkey);
+    if (j.contains("operator_approved_binaries")) j.at("operator_approved_binaries").get_to(c.operator_approved_binaries);
     if (j.contains("github_releases_url"))        j.at("github_releases_url").get_to(c.github_releases_url);
     if (j.contains("manifest_fetch_interval_sec")) j.at("manifest_fetch_interval_sec").get_to(c.manifest_fetch_interval_sec);
     if (j.contains("minimum_version"))            j.at("minimum_version").get_to(c.minimum_version);
@@ -193,6 +195,12 @@ void print_usage(const char* prog) {
     spdlog::info("  --token-ttl <sec>          Minted-token lifetime, 60-3600s (default: 600)");
     spdlog::info("  --enroll-server <b64> <id> Enroll a server: sign cert for its base64 gossip pubkey; <id> is a unique DNS label");
     spdlog::info("  --enroll-tpm-ak <b64>      Pin the server's platform binding key (base64 DER SPKI) in the cert");
+    spdlog::info("  --operator-root-pubkey <b64> OPERATOR TRUST builds: root key that signs servers in (or SP_OPERATOR_ROOT_PUBKEY / operator_root_pubkey)");
+    spdlog::info("  --operator-keygen <file>   Write an operator root keypair (0600) and print its public key; exit");
+    spdlog::info("  --operator-enroll <b64>    Sign an operator enrollment for a server's base64 gossip pubkey; needs --operator-keyfile and genesis_pubkey; exit");
+    spdlog::info("  --operator-keyfile <file>  Operator root keypair file for --operator-enroll");
+    spdlog::info("  --operator-enroll-out <f>  Where --operator-enroll writes the enrollment JSON (default: stdout)");
+    spdlog::info("  --operator-binary-sha256 <hex> Optional binary pin inside the enrollment");
     spdlog::info("  --enroll-tpm-ek-cert <path> Attach the server's TPM EK cert (PEM) for audit/validation");
     spdlog::info("  --verify-platform [blob]   Verify this host's platform evidence (AMD signature chain,");
     spdlog::info("                             guest policy, memory-encryption guarantees) and exit.");
@@ -331,6 +339,18 @@ ServerConfig load_config(int argc, char* argv[]) {
             config.enroll_tpm_ek_cert_path = argv[++i];
         } else if (std::strcmp(argv[i], "--first-run") == 0) {
             config.first_run = true;
+        } else if (std::strcmp(argv[i], "--operator-root-pubkey") == 0 && i + 1 < argc) {
+            config.operator_root_pubkey = argv[++i];
+        } else if (std::strcmp(argv[i], "--operator-keygen") == 0 && i + 1 < argc) {
+            config.operator_keygen_path = argv[++i];
+        } else if (std::strcmp(argv[i], "--operator-enroll") == 0 && i + 1 < argc) {
+            config.operator_enroll_node_pubkey = argv[++i];
+        } else if (std::strcmp(argv[i], "--operator-keyfile") == 0 && i + 1 < argc) {
+            config.operator_enroll_keyfile = argv[++i];
+        } else if (std::strcmp(argv[i], "--operator-enroll-out") == 0 && i + 1 < argc) {
+            config.operator_enroll_out = argv[++i];
+        } else if (std::strcmp(argv[i], "--operator-binary-sha256") == 0 && i + 1 < argc) {
+            config.operator_enroll_binary_sha256 = argv[++i];
         } else if (std::strcmp(argv[i], "--verify-platform") == 0) {
             config.verify_platform = true;
             if (i + 1 < argc && argv[i + 1][0] != '-') config.verify_platform_blob = argv[++i];
@@ -445,6 +465,7 @@ ServerConfig load_config(int argc, char* argv[]) {
             config.genesis_pubkey = v;
         }
     }
+    if (const char* v = std::getenv("SP_OPERATOR_ROOT_PUBKEY")) config.operator_root_pubkey = v;
     if (const char* v = std::getenv("SP_ONBOARD_TOKEN")) config.onboard_token = v;
     if (const char* v = std::getenv("SP_JWT_SECRET"))   config.jwt_secret  = v;
     if (const char* v = std::getenv("SP_RP_ID"))          config.rp_id       = v;
@@ -546,6 +567,8 @@ bool validate_config(const ServerConfig& config) {
     // CLI modes are exempt: --first-run generates the identity these anchor to, and
     // the enroll/onboard/manifest modes exit before any of it is used.
     const bool cli_mode = config.first_run || config.verify_platform ||
+                          !config.operator_keygen_path.empty() ||
+                          !config.operator_enroll_node_pubkey.empty() ||
                           config.onboard_server ||
                           config.mint_admission_token || !config.enroll_server_pubkey.empty() ||
                           !config.revoke_server_pubkey.empty() || !config.add_manifest_path.empty() ||

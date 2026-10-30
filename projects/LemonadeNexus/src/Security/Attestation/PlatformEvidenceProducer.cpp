@@ -43,15 +43,11 @@ PlatformEvidence PlatformEvidenceProducer::platform_bundle(const AttestationChal
     // PUBLIC key and nothing that could sign on this node's behalf. It derives
     // the quote nonce itself; `nonce` is what we independently expect, and the
     // source must refuse evidence bound to anything else.
-    if (sources_.platform_source) {
-        (void)nonce;
-        return sources_.platform_source(challenge);
-    }
-
-    std::string why;
 #if defined(NEXUS_OPERATOR_TRUST) && NEXUS_OPERATOR_TRUST
     if (challenge.profile_id == AttestationProfileId::OperatorEnrolled) {
         // Operator trust, not hardware trust: the platform half is the
+        // enrollment file, never nexus-attestd (which only knows SNP/TPM), so
+        // this runs ahead of any external platform source.
         // operator-signed enrollment the server was installed with, plus the
         // self-reported hash of the running binary. An absent or unreadable
         // enrollment yields an empty bundle, which the verifier fails closed.
@@ -73,6 +69,12 @@ PlatformEvidence PlatformEvidenceProducer::platform_bundle(const AttestationChal
         return PlatformEvidence{std::move(bundle)};
     }
 #endif
+    if (sources_.platform_source) {
+        (void)nonce;
+        return sources_.platform_source(challenge);
+    }
+
+    std::string why;
     if (challenge.profile_id == AttestationProfileId::SnpSvsmVtpm) {
         SnpSvsmEvidenceProduceConfig config;
         config.cache_dir = sources_.cache_directory;

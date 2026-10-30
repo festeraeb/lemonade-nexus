@@ -97,6 +97,20 @@ struct ServerConfig {
     // keypairs), print onboarding info (pubkeys, node ID, next steps), and exit.
     bool        first_run{false};
 
+    // --- Operator trust (LEMONADE_NEXUS_OPERATOR_TRUST builds only) ---------
+    // OPERATOR TRUST, NOT HARDWARE TRUST: base64 Ed25519 root key that signs
+    // servers in under AttestationProfileId::OperatorEnrolled. A default build
+    // ignores it with a warning. See docs/Operator-Trust.md.
+    std::string operator_root_pubkey;
+    std::vector<std::string> operator_approved_binaries;   // hex SHA-256 pins, optional
+    // CLI modes: --operator-keygen <file> ; --operator-enroll <node-gossip-b64>
+    // [--operator-keyfile <file>] [--operator-enroll-out <file>] [--operator-binary-sha256 <hex>]
+    std::string operator_keygen_path;
+    std::string operator_enroll_node_pubkey;
+    std::string operator_enroll_keyfile;
+    std::string operator_enroll_out;
+    std::string operator_enroll_binary_sha256;
+
     // Enrollment CLI mode (non-empty = run enrollment and exit)
     std::string enroll_server_pubkey;
     std::string enroll_server_id;
