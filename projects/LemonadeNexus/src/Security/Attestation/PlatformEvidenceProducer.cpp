@@ -1,5 +1,10 @@
 #include <LemonadeNexus/Security/Attestation/PlatformEvidenceProducer.hpp>
 
+#include <LemonadeNexus/Security/EvidenceOperatorEnrolled.hpp>
+
+#include <fstream>
+#include <iterator>
+
 #include <LemonadeNexus/Security/EvidenceSnpVtpm.hpp>
 #include <LemonadeNexus/Security/EvidenceSnpSvsmVtpm.hpp>
 #include <LemonadeNexus/Security/MeasurementIma.hpp>
@@ -44,6 +49,30 @@ PlatformEvidence PlatformEvidenceProducer::platform_bundle(const AttestationChal
     }
 
     std::string why;
+#if defined(NEXUS_OPERATOR_TRUST) && NEXUS_OPERATOR_TRUST
+    if (challenge.profile_id == AttestationProfileId::OperatorEnrolled) {
+        // Operator trust, not hardware trust: the platform half is the
+        // operator-signed enrollment the server was installed with, plus the
+        // self-reported hash of the running binary. An absent or unreadable
+        // enrollment yields an empty bundle, which the verifier fails closed.
+        OperatorEnrolledEvidence bundle;
+        const auto path = sources_.cache_directory / "operator-enrollment.json";
+        std::ifstream in(path);
+        if (!in) {
+            spdlog::debug("[producer] no operator enrollment at {}", path.string());
+            return PlatformEvidence{std::move(bundle)};
+        }
+        const std::string text((std::istreambuf_iterator<char>(in)),
+                               std::istreambuf_iterator<char>());
+        if (auto enrollment = decode_operator_enrollment(text)) {
+            bundle.enrollment = std::move(*enrollment);
+            bundle.binary_sha256 = self_binary_sha256_hex();
+        } else {
+            spdlog::debug("[producer] operator enrollment at {} does not decode", path.string());
+        }
+        return PlatformEvidence{std::move(bundle)};
+    }
+#endif
     if (challenge.profile_id == AttestationProfileId::SnpSvsmVtpm) {
         SnpSvsmEvidenceProduceConfig config;
         config.cache_dir = sources_.cache_directory;

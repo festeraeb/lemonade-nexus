@@ -246,6 +246,16 @@ Digest profile_digest(const LinuxAttestationProfile& profile) {
     add_bool(encoder, profile.require_seccomp);
     add_bool(encoder, profile.require_endorsement_revocation);
     encoder.add_u16(profile.security_ruleset);
+    // Operator trust pins. Appended only when present, so a profile without
+    // them digests exactly as it did before the field existed.
+    if (!profile.operator_root_pubkey_b64.empty()) {
+        encoder.add_string("operator-trust:v1");
+        encoder.add_string(profile.operator_root_pubkey_b64);
+        encoder.add_u64(profile.operator_approved_binaries_hex.size());
+        for (const auto& binary_sha256 : profile.operator_approved_binaries_hex) {
+            encoder.add_string(binary_sha256);
+        }
+    }
     return encoder.digest();
 }
 

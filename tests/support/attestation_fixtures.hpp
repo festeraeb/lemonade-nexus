@@ -47,6 +47,10 @@ inline void seed_svsm_activation(const nexus::security::NetworkId& network,
                                  const nexus::crypto::Ed25519PublicKey& node_key,
                                  const std::filesystem::path& store_dir) {
     using namespace nexus::security;
+    // EK -> AK activation exists only for the SVSM vTPM profile. A build whose
+    // Tier 1 profile is OperatorEnrolled (LEMONADE_NEXUS_OPERATOR_TRUST=ON) has
+    // no activation step, and the store refuses a record for another profile.
+    if (kTier1AttestationProfileId != AttestationProfileId::SnpSvsmVtpm) return;
     const std::vector<uint8_t> spki{1, 2, 3, 4};
     SvsmAkActivationRecord record;
     record.network_id = network;

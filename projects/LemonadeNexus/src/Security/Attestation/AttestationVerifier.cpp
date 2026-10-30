@@ -1,6 +1,7 @@
 #include <LemonadeNexus/Security/Attestation/AttestationVerifier.hpp>
 
 #include <LemonadeNexus/Security/Attestation/Providers/AzureSnpVtpmProvider.hpp>
+#include <LemonadeNexus/Security/Attestation/Providers/OperatorEnrolledProvider.hpp>
 #include <LemonadeNexus/Security/Attestation/Providers/SnpDirectBootProvider.hpp>
 #include <LemonadeNexus/Security/Attestation/Providers/SnpSvsmVtpmProvider.hpp>
 #include <LemonadeNexus/Security/Policy/SecurityConstants.hpp>
@@ -122,9 +123,14 @@ ProviderSet compiled_providers(LinuxAttestationProfile profile,
     ProviderSet providers;
     providers.push_back(
         std::make_shared<AzureSnpVtpmProvider>(profile, revocation));
-    providers.push_back(std::make_shared<SnpSvsmVtpmProvider>(std::move(profile),
-                                                               std::move(revocation)));
+    providers.push_back(std::make_shared<SnpSvsmVtpmProvider>(profile, std::move(revocation)));
     providers.push_back(std::make_shared<SnpDirectBootProvider>());
+#if defined(NEXUS_OPERATOR_TRUST) && NEXUS_OPERATOR_TRUST
+    // Operator trust, not hardware trust. Only a build that asked for it
+    // compiles this provider into the set; a default build has no provider for
+    // AttestationProfileId::OperatorEnrolled and fails such challenges closed.
+    providers.push_back(std::make_shared<OperatorEnrolledProvider>(profile));
+#endif
     return providers;
 }
 

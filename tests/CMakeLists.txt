@@ -224,7 +224,8 @@ add_nexus_test(test_security_lifecycle
     security/lifecycle/adversarial.cpp
     security/lifecycle/tree_consensus_path.cpp
     security/lifecycle/storage_key_path.cpp
-    security/lifecycle/upgrade_path.cpp)
+    security/lifecycle/upgrade_path.cpp
+    security/lifecycle/operator_enrolled_path.cpp)
 # Release adoption (Design-Auto-Update Phase 2) and the ruleset pin that keeps
 # network_id stable across releases.
 add_nexus_test(test_security_release
@@ -283,6 +284,7 @@ add_nexus_test(test_security_attestation
     security/attestation/release_approval.cpp
     security/attestation/release_bundle.cpp
     security/attestation/activation_delegation.cpp
+    security/attestation/operator_enrolled.cpp
     security/attestation/tier1_path.cpp)
 # providers.cpp runs the substitution negatives against the captured SNP blob.
 target_link_libraries(test_security_attestation PRIVATE LemonadeNexusAttestdCore)
