@@ -45,6 +45,15 @@ enum class AttestationProfileId : uint16_t {
 
     /// Intel TDX. Named so the enum stays stable; no provider exists.
     Tdx = 4,
+
+    /// OPERATOR TRUST, NOT HARDWARE TRUST. An operator root key signs each
+    /// server in (EvidenceOperatorEnrolled.hpp). No silicon measures anything
+    /// under this profile: every platform claim it emits means "the enrolling
+    /// operator vouched for this host", nothing more. It exists for self-hosted
+    /// meshes on hardware with no SEV-SNP, TDX or TPM, and only a binary built
+    /// with LEMONADE_NEXUS_OPERATOR_TRUST=ON issues challenges under it. A
+    /// default build names the ID (so the wire stays stable) and refuses it.
+    OperatorEnrolled = 5,
 };
 
 using AttestationProfileRuleset = uint16_t;
@@ -60,8 +69,15 @@ inline constexpr AttestationProfileRuleset kAttestationProfileRulesetVersion = 3
 /// answers with. The verified binary picks it; no host input reaches this
 /// value. A release switches this only after its selected provider and pinned
 /// profile have passed qualification.
+#if defined(NEXUS_OPERATOR_TRUST) && NEXUS_OPERATOR_TRUST
+// LEMONADE_NEXUS_OPERATOR_TRUST=ON: Tier 1 under operator trust (see
+// OperatorEnrolled above and docs/Operator-Trust.md). Never a release default.
+inline constexpr AttestationProfileId kTier1AttestationProfileId =
+    AttestationProfileId::OperatorEnrolled;
+#else
 inline constexpr AttestationProfileId kTier1AttestationProfileId =
     AttestationProfileId::SnpSvsmVtpm;
+#endif
 
 [[nodiscard]] std::string_view attestation_profile_id_name(AttestationProfileId id);
 

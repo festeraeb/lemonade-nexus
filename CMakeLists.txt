@@ -82,6 +82,18 @@ endif()
 # sidecar/embeddable profiles.
 option(LEMONADE_NEXUS_MINIMAL_DEPS "Build without TPM FAPI support" OFF)
 
+# OPERATOR TRUST, NOT HARDWARE TRUST. ON makes this binary issue Tier 1
+# challenges under AttestationProfileId::OperatorEnrolled: an operator root key
+# signs each server in, and no SEV-SNP, TDX or TPM evidence is required or
+# checked. For self-hosted meshes on hardware that has none of those. Never a
+# release default; see docs/Operator-Trust.md.
+option(LEMONADE_NEXUS_OPERATOR_TRUST
+       "Tier 1 under operator trust (OperatorEnrolled profile); not hardware attestation" OFF)
+if(LEMONADE_NEXUS_OPERATOR_TRUST)
+    message(WARNING "LEMONADE_NEXUS_OPERATOR_TRUST=ON: Tier 1 is operator trust, not hardware trust")
+    add_compile_definitions(NEXUS_OPERATOR_TRUST=1)
+endif()
+
 # The client SDK alone, for the mobile builds (scripts/build-sdk-mobile.sh):
 # only the SDK's own dependencies, no server, sidecar, tools or tests, so the
 # build cross-compiles for iOS and Android.

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <LemonadeNexus/Security/EvidenceSnpSvsmVtpm.hpp>
+#include <LemonadeNexus/Security/EvidenceOperatorEnrolled.hpp>
 #include <LemonadeNexus/Security/EvidenceSnpVtpm.hpp>
 
 #include <cstddef>
@@ -13,7 +14,8 @@ namespace nexus::security {
 
 inline constexpr uint32_t kPlatformEvidenceWireVersion = 1;
 
-using PlatformEvidence = std::variant<SnpVtpmEvidence, SnpSvsmVtpmEvidence>;
+using PlatformEvidence =
+    std::variant<SnpVtpmEvidence, SnpSvsmVtpmEvidence, OperatorEnrolledEvidence>;
 
 [[nodiscard]] inline SnpVtpmEvidence& azure_evidence(PlatformEvidence& evidence) {
     return std::get<SnpVtpmEvidence>(evidence);
@@ -35,6 +37,8 @@ using PlatformEvidence = std::variant<SnpVtpmEvidence, SnpSvsmVtpmEvidence>;
 enum class PlatformEvidenceType : uint16_t {
     AzureSnpVtpm = 1,
     SnpSvsmVtpm = 2,
+    /// Operator trust, not hardware trust (EvidenceOperatorEnrolled.hpp).
+    OperatorEnrolled = 3,
 };
 
 [[nodiscard]] PlatformEvidenceType platform_evidence_type(const PlatformEvidence& evidence);

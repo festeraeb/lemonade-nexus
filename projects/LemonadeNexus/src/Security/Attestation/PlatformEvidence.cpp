@@ -2,20 +2,25 @@
 
 #include <nlohmann/json.hpp>
 
+#include <type_traits>
+
 namespace nexus::security {
 
 using json = nlohmann::json;
 
 PlatformEvidenceType platform_evidence_type(const PlatformEvidence& evidence) {
-    return std::holds_alternative<SnpVtpmEvidence>(evidence)
-               ? PlatformEvidenceType::AzureSnpVtpm
-               : PlatformEvidenceType::SnpSvsmVtpm;
+    if (std::holds_alternative<SnpVtpmEvidence>(evidence)) return PlatformEvidenceType::AzureSnpVtpm;
+    if (std::holds_alternative<OperatorEnrolledEvidence>(evidence)) {
+        return PlatformEvidenceType::OperatorEnrolled;
+    }
+    return PlatformEvidenceType::SnpSvsmVtpm;
 }
 
 std::string_view platform_evidence_type_name(PlatformEvidenceType type) {
     switch (type) {
         case PlatformEvidenceType::AzureSnpVtpm: return "azure-snp-vtpm";
         case PlatformEvidenceType::SnpSvsmVtpm: return "snp-svsm-vtpm";
+        case PlatformEvidenceType::OperatorEnrolled: return "operator-enrolled";
     }
     return "unknown";
 }
@@ -25,10 +30,18 @@ std::string encode_platform_evidence(const PlatformEvidence& evidence) {
     envelope["version"] = kPlatformEvidenceWireVersion;
     const auto type = platform_evidence_type(evidence);
     envelope["type"] = platform_evidence_type_name(type);
-    envelope["payload"] = std::holds_alternative<SnpVtpmEvidence>(evidence)
-                              ? encode_snp_vtpm_evidence(std::get<SnpVtpmEvidence>(evidence))
-                              : encode_snp_svsm_vtpm_evidence(
-                                    std::get<SnpSvsmVtpmEvidence>(evidence));
+    envelope["payload"] = std::visit(
+        [](const auto& value) -> std::string {
+            using T = std::decay_t<decltype(value)>;
+            if constexpr (std::is_same_v<T, SnpVtpmEvidence>) {
+                return encode_snp_vtpm_evidence(value);
+            } else if constexpr (std::is_same_v<T, SnpSvsmVtpmEvidence>) {
+                return encode_snp_svsm_vtpm_evidence(value);
+            } else {
+                return encode_operator_enrolled_evidence(value);
+            }
+        },
+        evidence);
     return envelope.dump();
 }
 
@@ -51,6 +64,11 @@ std::optional<PlatformEvidence> decode_platform_evidence(std::string_view text) 
     }
     if (type == platform_evidence_type_name(PlatformEvidenceType::SnpSvsmVtpm)) {
         auto decoded = decode_snp_svsm_vtpm_evidence(payload);
+        if (!decoded) return std::nullopt;
+        return PlatformEvidence{std::move(*decoded)};
+    }
+    if (type == platform_evidence_type_name(PlatformEvidenceType::OperatorEnrolled)) {
+        auto decoded = decode_operator_enrolled_evidence(payload);
         if (!decoded) return std::nullopt;
         return PlatformEvidence{std::move(*decoded)};
     }

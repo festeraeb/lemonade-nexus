@@ -25,9 +25,12 @@ namespace {
 std::string endorsement_cache_key(const security::PlatformEvidence& platform) {
     const auto report = std::visit(
         [](const auto& evidence) -> std::optional<security::SnpReport> {
-            if constexpr (std::is_same_v<std::decay_t<decltype(evidence)>,
-                                         security::SnpSvsmVtpmEvidence>) {
+            using T = std::decay_t<decltype(evidence)>;
+            if constexpr (std::is_same_v<T, security::SnpSvsmVtpmEvidence>) {
                 return security::parse_snp_report(evidence.svsm_report);
+            } else if constexpr (std::is_same_v<T, security::OperatorEnrolledEvidence>) {
+                // Operator trust carries no AMD endorsement to cache.
+                return std::nullopt;
             } else {
                 std::optional<security::SnpReport> snp;
                 if (const auto hcl = security::parse_hcl_blob(evidence.hcl_blob)) snp = hcl->snp;

@@ -9,6 +9,7 @@ std::string_view attestation_profile_id_name(AttestationProfileId id) {
         case AttestationProfileId::SnpSvsmVtpm:   return "snp-svsm-vtpm";
         case AttestationProfileId::SnpDirectBoot: return "snp-direct-boot";
         case AttestationProfileId::Tdx:           return "tdx";
+        case AttestationProfileId::OperatorEnrolled: return "operator-enrolled";
     }
     return "unnamed";
 }
@@ -19,6 +20,7 @@ bool is_known_attestation_profile_id(AttestationProfileId id) {
         case AttestationProfileId::SnpSvsmVtpm:
         case AttestationProfileId::SnpDirectBoot:
         case AttestationProfileId::Tdx:
+        case AttestationProfileId::OperatorEnrolled:
             return true;
         case AttestationProfileId::Unknown:
             return false;

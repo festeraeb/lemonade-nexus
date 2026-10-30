@@ -108,6 +108,16 @@ struct LinuxAttestationProfile {
     bool require_endorsement_revocation{true};
 
     SecurityRulesetVersion security_ruleset{};
+
+    // --- Operator trust (AttestationProfileId::OperatorEnrolled only) --------
+    // Base64 Ed25519 public key of the operator root that signs servers in.
+    // Empty means the OperatorEnrolled provider is not ready and refuses every
+    // candidate. Both fields enter profile_digest() only when this key is set,
+    // so every profile that leaves them empty keeps its upstream digest.
+    std::string operator_root_pubkey_b64;
+    /// Hex SHA-256 values the operator pins for the server binary. Empty means
+    /// the enrollment's own binary pin (if any) is the only binary rule.
+    std::vector<std::string> operator_approved_binaries_hex;
 };
 
 /// A condition that makes the compiled profile incomplete or invalid.
