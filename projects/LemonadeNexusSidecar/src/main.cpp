@@ -100,6 +100,8 @@ struct SidecarConfig {
     long        parent_pid{0};
     std::string log_level{"info"};
     bool        pin_server{false};             // keep the configured endpoint (no SEIP switch)
+    bool        inference{false};              // join as a Tier 3 inference node (ln_set_inference_node)
+    std::string catalog_path;                  // service catalog JSON registered on the first exposed vport
 };
 
 std::optional<ExposeMapping> parse_expose(const std::string& spec) {
@@ -131,6 +133,8 @@ void apply_json_config(SidecarConfig& cfg, const nlohmann::json& j) {
     if (j.contains("control_port")) cfg.control_port  = j.at("control_port").get<uint16_t>();
     if (j.contains("control_token")) cfg.control_token = j.at("control_token").get<std::string>();
     if (j.contains("log_level"))    cfg.log_level     = j.at("log_level").get<std::string>();
+    if (j.contains("inference"))    cfg.inference     = j.at("inference").get<bool>();
+    if (j.contains("catalog"))      cfg.catalog_path  = j.at("catalog").get<std::string>();
     if (j.contains("expose") && j.at("expose").is_array()) {
         for (const auto& e : j.at("expose")) {
             if (auto m = parse_expose(e.get<std::string>())) cfg.exposes.push_back(*m);
@@ -157,6 +161,8 @@ void apply_env(SidecarConfig& cfg) {
         if (auto m = parse_expose(v)) cfg.exposes.push_back(*m);
     }
     if (std::getenv("LN_SIDECAR_PIN_SERVER"))         cfg.pin_server = true;
+    if (std::getenv("LN_SIDECAR_INFERENCE"))          cfg.inference = true;
+    if (const char* v = std::getenv("LN_SIDECAR_CATALOG")) cfg.catalog_path = v;
     if (const char* v = std::getenv("SP_PARENT_PID")) cfg.parent_pid = std::atol(v);
     if (const char* v = std::getenv("SP_LOG_LEVEL"))  cfg.log_level = v;
 }
@@ -174,6 +180,10 @@ void print_usage(const char* prog) {
         "  --data-root <path>      State directory (default ./nexus-sidecar)\n"
         "  --link-token <token>    Single-use device link token (first join)\n"
         "  --expose <vport:local>  Publish 127.0.0.1:local at <mesh_ip>:vport (repeatable)\n"
+        "  --inference             Join as a Tier 3 inference node (the device a mesh port can select);\n"
+        "                          pair with --expose 13305:<lemond port>\n"
+        "  --catalog <path>        Service catalog JSON to register on the first --expose vport, so\n"
+        "                          svc:<family> permissions gate the exposed service\n"
         "  --control-port <N>      Localhost control API port (default 9110)\n"
         "  --control-token <tok>   Bearer required by all control endpoints (API off if unset)\n"
         "  --parent-pid <pid>      Exit when this process disappears\n"
@@ -246,6 +256,10 @@ SidecarConfig load_config(int argc, char* argv[], bool& want_exit) {
             cfg.log_level = v8;
         } else if (const char* v9 = next("--control-token")) {
             cfg.control_token = v9;
+        } else if (std::strcmp(argv[i], "--inference") == 0) {
+            cfg.inference = true;
+        } else if (const char* v10 = next("--catalog")) {
+            cfg.catalog_path = v10;
         } else if (next("--config")) {
             // already handled
         }
@@ -304,6 +318,26 @@ int main(int argc, char* argv[]) {
     lnsdk::LemonadeNexusClient client{sc};
     client.set_identity(identity);
     if (!cfg.link_token.empty()) client.set_link_token(cfg.link_token);
+    // Tier 3: the server records is_inference when it creates the endpoint, so
+    // this must precede the join. Without it the device is Tier 4 and a mesh
+    // port answers 409 "not an inference server" for it.
+    if (cfg.inference) {
+        client.set_inference_node(true);
+        spdlog::info("Joining as a Tier 3 inference node");
+    }
+    nlohmann::json catalog_json;  // empty = none
+    if (!cfg.catalog_path.empty()) {
+        std::ifstream cin(cfg.catalog_path);
+        if (!cin) {
+            spdlog::error("--catalog {}: cannot read", cfg.catalog_path);
+            return 1;
+        }
+        catalog_json = nlohmann::json::parse(cin, nullptr, false);
+        if (catalog_json.is_discarded() || !catalog_json.is_object()) {
+            spdlog::error("--catalog {}: not a JSON object", cfg.catalog_path);
+            return 1;
+        }
+    }
 
     SidecarState state;
 
@@ -458,11 +492,21 @@ int main(int argc, char* argv[]) {
 
                 client.enable_mesh();  // background peer discovery + heartbeat
 
+                bool catalog_registered = false;
                 for (const auto& e : cfg.exposes) {
                     auto r = client.expose_service(
                         e.vport, "tcp:127.0.0.1:" + std::to_string(e.local_port));
                     if (r.ok) {
                         spdlog::info("Exposed 127.0.0.1:{} at mesh :{}", e.local_port, e.vport);
+                        if (catalog_json.is_object() && !catalog_json.empty() && !catalog_registered) {
+                            auto c = client.set_service_catalog(e.vport, catalog_json);
+                            if (c.ok) {
+                                spdlog::info("Registered service catalog on mesh :{}", e.vport);
+                                catalog_registered = true;
+                            } else {
+                                spdlog::warn("Failed to register catalog on :{}: {}", e.vport, c.error);
+                            }
+                        }
                     } else {
                         spdlog::warn("Failed to expose :{} -> 127.0.0.1:{}: {}",
                                      e.vport, e.local_port, r.error);
