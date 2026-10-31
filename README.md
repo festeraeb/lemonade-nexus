@@ -267,6 +267,43 @@ Attestation depends on the approved platform and threat model. Confidential comp
 
 These are implementation limits, not settings that an operator can disable to gain authority.
 
+### Operator trust, not hardware trust (this fork only)
+
+> This section describes a fork (branch `cesarops/operator-enrolled-2026-10-30`, based on upstream `d409790`). Nothing here is upstream behaviour, and none of it is a security claim about hardware.
+
+Upstream Tier 1 needs AMD SEV-SNP with a vTPM. Many people who want to run their own mesh (a school, a search-and-rescue team, a home lab) have ordinary Intel servers with no SEV-SNP, TDX or TPM. On those machines no server can reach Tier 1, so the mesh never forms.
+
+This fork adds a build option, `LEMONADE_NEXUS_OPERATOR_TRUST=ON` (default **OFF**), with one new attestation profile, `OperatorEnrolled` (= 5). The operator makes a root key and signs each server in. A server answers a Tier 1 challenge with that signed enrollment instead of a hardware report. The verifier still binds the answer to one live challenge, one node, one epoch and one incarnation, and the eligibility policy is not relaxed.
+
+What it means, plainly:
+
+- **Tier 1 is exactly as trustworthy as the operator's root key and the hosts the operator chose.** Nothing is measured. A compromised host that keeps its identity key and its enrollment file passes.
+- It does **not** replace SEV-SNP and is not a step toward it. It is a way to run the protocol on hardware that cannot attest, with the trust model written down.
+- A default build names the profile and refuses it. The option changes a compile-time constant, so an ON binary is a different binary, and its logs say `OPERATOR TRUST: Tier 1 under operator enrollment ..., not hardware attestation` at start.
+
+What was run (2026-10-30, evidence kept with the CESARops entry):
+
+| check | result |
+|---|---|
+| operator-trust tests, default build | 18 passed (incl. "default build has no provider for the profile") |
+| operator-trust tests, ON build | 20 passed (incl. the real producer answering a service challenge) |
+| five founders in process, ON build | Genesis, epoch 1, `consensus_quorum == 4`, commits continue with one founder offline |
+| real network: anchor + 5 founders on 4 Intel machines (t440, c4 x2, c2, c3) | 5 PASSED verdicts, `genesis founding: 5 attested founders`, all five `Active: epoch 1` 78 s after the verdicts |
+| upstream tests in the ON build | 14 fail, all because their fixtures assume the SVSM profile constant (listed in the fork's evidence); the ON build is never a release |
+
+The fork also has these, all small and separate commits:
+
+- **Sidecar as a Tier 3 front end:** `lemonade-nexus-sidecar --inference --catalog <file> --expose 13305:<lemonade port>` puts an unchanged Lemonade server on the mesh as a Tier 3 inference node. Also `--genesis-key`, `--mesh-port`, `--link-token-out`, and a control route `/assign`.
+- **Mesh port failover:** for a model named without a device prefix, if the chosen device gives no answer (or its ingress says 502/503), the mesh port re-sends the request once to the next-ranked device. A request that names its device is never moved. `status()` reports `auto_failovers`. Live test: 47 of 47 requests answered while one Tier 3 Lemonade was stopped and started; before this change the same kind of stop gave HTTP 409 to the client.
+
+Things we found that may be worth raising upstream (questions, not fixes):
+
+1. An invite that names `svc:` permissions is accepted, but the joining device did not get them; the group owner had to assign them (`POST /api/tree/node/assignments/<group>`).
+2. An invite minted through one Tier 1 server was refused by another (`invalid or expired link token`) for at least 8 minutes. `docs/SDK-Guide.md` says a code works on any Tier 1 server after about a second. Joining through the issuing server worked at once.
+3. The mesh port had no failover between devices serving the same model (handled in this fork as above).
+
+How to build a network like this, step by step: [docs/Operator-Trust-Bootstrap.md](docs/Operator-Trust-Bootstrap.md). What each Tier 1 claim means under this profile: [docs/Operator-Trust.md](docs/Operator-Trust.md).
+
 ## 🛠️ Building from Source
 
 The native build requires **C++20**, **CMake 3.25.1+**, **Ninja**, **Git**, and a **Rust/Cargo toolchain**. Rust builds the BoringTun, virtual-netstack, and FROST components.

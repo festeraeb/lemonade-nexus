@@ -9,6 +9,8 @@ Status: a fork-local build option, `LEMONADE_NEXUS_OPERATOR_TRUST=ON`, default
 OFF. A default build names the profile and refuses it. Draft: the prose is to
 be read and edited with the operator before any of it is proposed upstream.
 
+Step-by-step network bring-up, as run on our test network: [Operator-Trust-Bootstrap.md](Operator-Trust-Bootstrap.md).
+
 ## What it is
 
 Upstream Tier 1 requires AMD SEV-SNP with a vTPM (`SnpSvsmVtpm`): the silicon
