@@ -355,6 +355,7 @@ void GossipService::send_startup_server_hello() {
                 hello["advertised_endpoint"] = our_advertised_endpoint_;
             }
             if (our_http_port_ != 0) hello["http_port"] = our_http_port_;
+            if (our_udp_port_ != 0) hello["udp_port"] = our_udp_port_;
         }
         auto payload_str = hello.dump();
         std::vector<uint8_t> payload_bytes(payload_str.begin(), payload_str.end());
@@ -1835,6 +1836,7 @@ void GossipService::on_gossip_tick() {
                 if (!our_advertised_endpoint_.empty())
                     hello["advertised_endpoint"] = our_advertised_endpoint_;
                 if (our_http_port_ != 0) hello["http_port"] = our_http_port_;
+                if (our_udp_port_ != 0) hello["udp_port"] = our_udp_port_;
             }
             auto hello_str = hello.dump();
             std::vector<uint8_t> hello_bytes(hello_str.begin(), hello_str.end());
@@ -2068,6 +2070,7 @@ void to_json(nlohmann::json& j, const GossipPeer& p) {
         {"endpoint",            p.endpoint},
         {"advertised_endpoint", p.advertised_endpoint},
         {"http_port",           p.http_port},
+        {"udp_port",            p.udp_port},
         {"last_seen",           p.last_seen},
         {"reputation",          p.reputation},
         {"certificate_json",    p.certificate_json},
@@ -2081,6 +2084,7 @@ void from_json(const nlohmann::json& j, GossipPeer& p) {
     p.endpoint            = j.value("endpoint", "");
     p.advertised_endpoint = j.value("advertised_endpoint", "");
     p.http_port           = j.value("http_port", uint16_t{9100});
+    p.udp_port            = j.value("udp_port", uint16_t{0});
     p.last_seen           = j.value("last_seen", uint64_t{0});
     p.reputation          = j.value("reputation", 1.0f);
     p.certificate_json    = j.value("certificate_json", "");
@@ -2642,6 +2646,7 @@ void GossipService::handle_server_hello(const asio::ip::udp::endpoint& sender,
             return;
         }
 
+        std::optional<GossipPeer> backbone_refresh;  // a backbone peer whose UDP port changed
         {
             std::lock_guard lock(peers_mutex_);
             auto it = std::find_if(peers_.begin(), peers_.end(),
@@ -2663,6 +2668,12 @@ void GossipService::handle_server_hello(const asio::ip::udp::endpoint& sender,
                 hp_it->get<uint64_t>() > 0 && hp_it->get<uint64_t>() <= 0xFFFF) {
                 announced_http_port = static_cast<uint16_t>(hp_it->get<uint64_t>());
             }
+            uint16_t announced_udp_port = 0;
+            if (const auto up_it = j.find("udp_port");
+                up_it != j.end() && up_it->is_number_unsigned() &&
+                up_it->get<uint64_t>() > 0 && up_it->get<uint64_t>() <= 0xFFFF) {
+                announced_udp_port = static_cast<uint16_t>(up_it->get<uint64_t>());
+            }
             const auto advertised = j.value("advertised_endpoint", std::string{});
             // Cross-check the advertised endpoint against the UDP source we
             // actually observed. Only a match is "source-confirmed" and safe to
@@ -2673,6 +2684,10 @@ void GossipService::handle_server_hello(const asio::ip::udp::endpoint& sender,
                 it->certificate_json = j.dump();
                 it->region = j.value("region", "");
                 if (announced_http_port != 0) it->http_port = announced_http_port;
+                if (announced_udp_port != 0 && it->udp_port != announced_udp_port) {
+                    it->udp_port = announced_udp_port;
+                    if (!it->backbone_ip.empty() && !it->mesh_pubkey.empty()) backbone_refresh = *it;
+                }
                 if (!advertised.empty()) {
                     // Tracked #6: an authenticated direct hello (PoP enforced
                     // above) refreshes a stale stored endpoint — otherwise a
@@ -2698,6 +2713,7 @@ void GossipService::handle_server_hello(const asio::ip::udp::endpoint& sender,
                 peer.region             = j.value("region", "");
                 peer.http_port          = announced_http_port != 0 ? announced_http_port
                                                                    : uint16_t{9100};
+                peer.udp_port           = announced_udp_port;
                 peer.last_seen          = static_cast<uint64_t>(
                     chrono::system_clock::to_time_t(chrono::system_clock::now()));
                 peer.reputation         = 1.0f;
@@ -2711,6 +2727,8 @@ void GossipService::handle_server_hello(const asio::ip::udp::endpoint& sender,
                 return p.pubkey.empty() && p.endpoint == ep;
             });
         }
+
+        if (backbone_refresh) try_add_backbone_mesh_peer(*backbone_refresh);
 
         spdlog::info("[{}] accepted ServerHello from {} ({})",
                       name(), cert.server_id, ep);
@@ -2783,19 +2801,32 @@ void GossipService::try_add_backbone_mesh_peer(const GossipPeer& peer) {
     std::string mesh_endpoint;
     auto colon = peer.endpoint.rfind(':');
     if (colon != std::string::npos) {
-        // Extract the IP from the gossip endpoint "ip:9102" and use port 51940
-        mesh_endpoint = peer.endpoint.substr(0, colon) + ":51940";
+        // The IP of the gossip endpoint and the mesh UDP port the peer announced
+        // (51940, the default, when it announced none).
+        mesh_endpoint = peer.endpoint.substr(0, colon) + ":" +
+                        std::to_string(peer.udp_port != 0 ? peer.udp_port : uint16_t{51940});
     }
 
     const std::string key = peer.mesh_pubkey + "|" + peer.backbone_ip;
     {
         std::lock_guard lock(peers_mutex_);
-        if (backbone_peers_added_.count(key)) return;
+        if (backbone_peers_added_.count(key)) {
+            // Already a backbone peer: move it if the announced port changed.
+            auto& last = backbone_peer_endpoints_[key];
+            if (last == mesh_endpoint) return;
+            if (boringtun_->update_endpoint(peer.mesh_pubkey, mesh_endpoint)) {
+                spdlog::info("[{}] backbone mesh peer {} endpoint {} -> {}", name(),
+                             peer.backbone_ip, last, mesh_endpoint);
+                last = mesh_endpoint;
+            }
+            return;
+        }
     }
     if (boringtun_->add_peer(peer.mesh_pubkey, peer.backbone_ip + "/32", mesh_endpoint)) {
         {
             std::lock_guard lock(peers_mutex_);
             backbone_peers_added_.insert(key);
+            backbone_peer_endpoints_[key] = mesh_endpoint;
         }
         spdlog::info("[{}] added backbone mesh peer {} ({}) endpoint={}",
                       name(), peer.backbone_ip, peer.pubkey.substr(0, 12), mesh_endpoint);

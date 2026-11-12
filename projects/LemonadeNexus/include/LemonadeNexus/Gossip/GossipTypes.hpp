@@ -131,6 +131,7 @@ struct GossipPeer {
     std::string backbone_ip;         // "172.16.0.X" (empty until allocated)
     std::string region;              // cloud region code (e.g. "us-east-1")
     uint16_t    http_port{9100};     // HTTP control plane port
+    uint16_t    udp_port{0};         // mesh/backbone UDP port the peer announces (0 = not announced: 51940)
     uint64_t    last_seen{0};        // Unix timestamp
     float       reputation{1.0f};
     std::string certificate_json;    // serialized ServerCertificate (may be empty)

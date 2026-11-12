@@ -179,6 +179,10 @@ public:
     /// peers list it in GET /api/servers; without it every peer was listed with
     /// the default 9100 and clients could not fail over to a server on another port.
     void set_our_http_port(uint16_t port) { our_http_port_ = port; }
+    /// The mesh UDP port (config udp_port) the backbone tunnel reaches this server on.
+    /// Peers used to dial 51940 whatever the config said, so the backbone (and tree
+    /// replication over it) never came up between servers on other ports.
+    void set_our_udp_port(uint16_t port) { our_udp_port_ = port; }
 
     /// Broadcast a backbone IPAM allocation delta to all peers.
     void broadcast_backbone_ipam_delta(const ipam::BackboneAllocationDelta& delta);
@@ -808,6 +812,8 @@ private:
     std::string                      our_mesh_pubkey_;   // base64 X25519
     std::string                      our_advertised_endpoint_;  // "ip:port" we are reachable at
     uint16_t                         our_http_port_{0};          // 0 = not announced
+    uint16_t                         our_udp_port_{0};           // 0 = not announced
+    std::map<std::string, std::string> backbone_peer_endpoints_; // key -> endpoint last given
     uint32_t                         hello_refresh_ticks_{0};
 
     // Backbone transport. vnet_ is set once before the io loop runs; the
