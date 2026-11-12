@@ -11,6 +11,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <ctime>
 #include <condition_variable>
 #include <csignal>
 #include <cstdint>
@@ -115,6 +116,7 @@ struct SidecarConfig {
     std::vector<std::string> fallback_servers; // more "host:port" public APIs to try when `server` is down
     bool        leave{false};                  // one-shot: sign in, delete this device's node, exit
     int         leave_after_sec{0};            // with leave: run the mesh this long first (a live check)
+    std::vector<lnsdk::ServiceAnnouncement> services;  // announced in every heartbeat (config "services")
 };
 
 std::optional<ExposeMapping> parse_expose(const std::string& spec) {
@@ -152,6 +154,11 @@ void apply_json_config(SidecarConfig& cfg, const nlohmann::json& j) {
     if (j.contains("device_name"))  cfg.device_name   = j.at("device_name").get<std::string>();
     if (j.contains("leave"))        cfg.leave         = j.at("leave").get<bool>();
     if (j.contains("leave_after_sec")) cfg.leave_after_sec = j.at("leave_after_sec").get<int>();
+    if (j.contains("services") && j.at("services").is_array()) {
+        for (const auto& service : j.at("services")) {
+            if (service.is_object()) cfg.services.push_back(service.get<lnsdk::ServiceAnnouncement>());
+        }
+    }
     if (j.contains("fallback_servers") && j.at("fallback_servers").is_array())
         cfg.fallback_servers = j.at("fallback_servers").get<std::vector<std::string>>();
     if (j.contains("mesh_port"))    cfg.mesh_port     = j.at("mesh_port").get<uint16_t>();
@@ -365,6 +372,11 @@ int main(int argc, char* argv[]) {
     }
     lnsdk::LemonadeNexusClient client{sc};
     client.set_identity(identity);
+    if (!cfg.services.empty() && !client.set_announced_services(cfg.services)) {
+        spdlog::warn("config \"services\" is beyond the announce bounds (at most {} services with "
+                     "short plain names and ports 1-65535); none are announced",
+                     lnsdk::kMaxAnnouncedServices);
+    }
     if (!cfg.link_token.empty()) client.set_link_token(cfg.link_token);
     // Tier 3: the server records is_inference when it creates the endpoint, so
     // this must precede the join. Without it the device is Tier 4 and a mesh
@@ -469,6 +481,7 @@ int main(int argc, char* argv[]) {
     // last handshake, bytes) plus this sidecar's own state and version.
     control.Get("/mesh", [&](const httplib::Request&, httplib::Response& res) {
         const auto ms = client.mesh_status();
+        const auto now_unix = static_cast<int64_t>(std::time(nullptr));
         nlohmann::json peers = nlohmann::json::array();
         for (const auto& p : client.get_mesh_peers()) {
             peers.push_back({{"node_id", p.node_id}, {"hostname", p.hostname},
@@ -477,7 +490,8 @@ int main(int argc, char* argv[]) {
                              {"endpoint", p.endpoint}, {"relay_endpoint", p.relay_endpoint},
                              {"last_handshake", p.last_handshake}, {"last_seen", p.last_seen},
                              {"rx_bytes", p.rx_bytes}, {"tx_bytes", p.tx_bytes},
-                             {"latency_ms", p.latency_ms}, {"mesh_pubkey", p.mesh_pubkey},
+                             {"latency_ms", p.latency_ms}, {"latency_age_sec", lnsdk::latency_age_sec(p, now_unix)},
+                             {"services", p.services}, {"mesh_pubkey", p.mesh_pubkey},
                              {"permissions", p.permissions}});
         }
         nlohmann::json j = {
@@ -501,10 +515,11 @@ int main(int argc, char* argv[]) {
     // Mint a device link token so another device can join this account.
     control.Get("/peers", [&](const httplib::Request&, httplib::Response& res) {
         nlohmann::json out = nlohmann::json::array();
+        const auto now_unix = static_cast<int64_t>(std::time(nullptr));
         for (const auto& p : client.get_mesh_peers()) {
             out.push_back({{"node_id", p.node_id}, {"hostname", p.hostname}, {"tunnel_ip", p.tunnel_ip},
                            {"is_online", p.is_online}, {"path", p.path}, {"latency_ms", p.latency_ms},
-                           {"mgmt_pubkey", p.mgmt_pubkey}, {"permissions", p.permissions}});
+                           {"latency_age_sec", lnsdk::latency_age_sec(p, now_unix)}, {"mgmt_pubkey", p.mgmt_pubkey}, {"permissions", p.permissions}});
         }
         res.set_content(out.dump(), "application/json");
     });

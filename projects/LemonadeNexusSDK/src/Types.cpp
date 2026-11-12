@@ -201,6 +201,8 @@ void to_json(json& j, const MeshPeer& p) {
         {"rx_bytes",       p.rx_bytes},
         {"tx_bytes",       p.tx_bytes},
         {"latency_ms",     p.latency_ms},
+        {"latency_at",     p.latency_at},
+        {"services",       p.services},
         {"keepalive",      p.keepalive},
         {"last_seen",      p.last_seen},
         {"mgmt_pubkey",    p.mgmt_pubkey},
@@ -230,6 +232,13 @@ void from_json(const json& j, MeshPeer& p) {
     p.rx_bytes       = j.value("rx_bytes", uint64_t{0});
     p.tx_bytes       = j.value("tx_bytes", uint64_t{0});
     p.latency_ms     = j.value("latency_ms", int32_t{-1});
+    p.latency_at     = j.value("latency_at", int64_t{0});
+    p.services.clear();
+    if (j.contains("services") && j["services"].is_array()) {
+        for (const auto& service : j["services"]) {
+            if (service.is_object()) p.services.push_back(service.get<ServiceAnnouncement>());
+        }
+    }
     p.keepalive      = j.value("keepalive", uint16_t{5});
     p.last_seen      = j.value("last_seen", uint64_t{0});
     p.mgmt_pubkey    = j.value("mgmt_pubkey", "");
@@ -237,6 +246,54 @@ void from_json(const json& j, MeshPeer& p) {
     if (j.contains("peer_permissions") && j["peer_permissions"].is_array()) {
         for (const auto& permission : j["peer_permissions"]) {
             if (permission.is_string()) p.permissions.push_back(permission.get<std::string>());
+        }
+    }
+}
+
+// --- ServiceAnnouncement ---
+namespace {
+bool announce_token(const std::string& text, std::size_t max_len, bool extended) {
+    if (text.empty() || text.size() > max_len) return false;
+    for (const char c : text) {
+        const bool plain = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                           (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+        if (!plain && !(extended && (c == ':' || c == '/' || c == '@' || c == '+'))) return false;
+    }
+    return true;
+}
+} // namespace
+
+bool services_announceable(const std::vector<ServiceAnnouncement>& services) {
+    if (services.size() > kMaxAnnouncedServices) return false;
+    for (std::size_t i = 0; i < services.size(); ++i) {
+        const auto& s = services[i];
+        if (!announce_token(s.name, kMaxServiceNameLen, false) ||
+            !announce_token(s.kind, kMaxServiceKindLen, false) || s.port == 0 ||
+            s.models.size() > kMaxServiceModels) {
+            return false;
+        }
+        for (const auto& model : s.models) {
+            if (!announce_token(model, kMaxServiceModelNameLen, true)) return false;
+        }
+        for (std::size_t k = 0; k < i; ++k) {
+            if (services[k].name == s.name) return false;
+        }
+    }
+    return true;
+}
+
+void to_json(json& j, const ServiceAnnouncement& s) {
+    j = json{{"name", s.name}, {"kind", s.kind}, {"port", s.port}, {"models", s.models}};
+}
+
+void from_json(const json& j, ServiceAnnouncement& s) {
+    s.name = j.value("name", "");
+    s.kind = j.value("kind", "");
+    s.port = j.value("port", uint16_t{0});
+    s.models.clear();
+    if (j.contains("models") && j["models"].is_array()) {
+        for (const auto& model : j["models"]) {
+            if (model.is_string()) s.models.push_back(model.get<std::string>());
         }
     }
 }

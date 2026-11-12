@@ -862,6 +862,10 @@ MeshTunnelStatus BoringtunMesh::mesh_status() const {
         }
         mp.last_handshake = static_cast<int64_t>(peer.last_handshake);
         mp.last_rx       = static_cast<int64_t>(peer.last_rx);
+        if (peer.rtt_at != 0) {
+            mp.latency_ms = peer.rtt_ms;
+            mp.latency_at = static_cast<int64_t>(peer.rtt_at);
+        }
         mp.rx_bytes      = peer.rx_bytes;
         mp.tx_bytes      = peer.tx_bytes;
         mp.keepalive     = peer.persistent_keepalive;

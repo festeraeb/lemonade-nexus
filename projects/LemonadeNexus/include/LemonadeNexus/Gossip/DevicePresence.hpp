@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <mutex>
+#include <nlohmann/json_fwd.hpp>
 #include <optional>
 #include <span>
 #include <string>
@@ -60,13 +61,62 @@ inline constexpr std::size_t kDevicePresenceMaxLanEndpoints = 4;
 /// this long after the device stops sending heartbeats.
 inline constexpr uint64_t kDevicePresenceLanTtlSec = 120;
 
+/// Bounds of the service list a device announces in its mesh heartbeat
+/// (`services`). The list is data from a device: it is checked against these
+/// before it is stored, shared, or listed.
+inline constexpr std::size_t kDevicePresenceMaxServices        = 8;
+inline constexpr std::size_t kDevicePresenceMaxServiceName     = 32;
+inline constexpr std::size_t kDevicePresenceMaxServiceKind     = 16;
+inline constexpr std::size_t kDevicePresenceMaxServiceModels   = 8;
+inline constexpr std::size_t kDevicePresenceMaxServiceModelLen = 64;
+
+/// How long a device's announced services stay listed after the heartbeat
+/// that carried them, in seconds. A current client repeats them with every
+/// heartbeat.
+inline constexpr uint64_t kDevicePresenceServicesTtlSec = 120;
+
+/// One service a device offers: a `name` (for example "ollama"), a `kind`
+/// ("llm", "http", ...), the TCP/UDP `port` it listens on, and the optional
+/// names of the `models` it serves. Informational: it grants no access and
+/// opens no port.
+struct ServiceAnnouncement {
+    std::string              name;
+    std::string              kind;
+    uint16_t                 port{0};
+    std::vector<std::string> models;
+
+    bool operator==(const ServiceAnnouncement&) const = default;
+};
+
+/// True when `service` is within the bounds above: `name` 1 to 32 and `kind`
+/// 1 to 16 characters from [A-Za-z0-9._-]; `port` 1 to 65535; at most 8
+/// `models`, each 1 to 64 printable ASCII characters without spaces and
+/// without quotes, backslash, '<' and '>'. Pure.
+[[nodiscard]] bool presence_service_valid(const ServiceAnnouncement& service);
+
+/// True when `services` has at most kDevicePresenceMaxServices entries, each
+/// valid, with distinct names. Pure.
+[[nodiscard]] bool presence_services_valid(const std::vector<ServiceAnnouncement>& services);
+
+/// Parse a JSON array of {"name", "kind", "port", "models"?} objects.
+/// nullopt when `value` is not an array, an entry is not an object, a field
+/// has the wrong type, an unknown key is present, or presence_services_valid
+/// fails. Pure.
+[[nodiscard]] std::optional<std::vector<ServiceAnnouncement>> parse_presence_services(
+    const nlohmann::json& value);
+
+/// The JSON array parse_presence_services reads. Pure.
+[[nodiscard]] nlohmann::json presence_services_json(const std::vector<ServiceAnnouncement>& services);
+
 /// One presence entry: the device node `node_id` was present at `seen` (Unix
 /// seconds), and reported the LAN endpoints `lan` (empty when none within
-/// kDevicePresenceLanTtlSec of `seen`).
+/// kDevicePresenceLanTtlSec of `seen`) and the announced `services` (empty
+/// when none within kDevicePresenceServicesTtlSec of `seen`).
 struct PresenceEntry {
     std::string              node_id;
     uint64_t                 seen{0};
     std::vector<std::string> lan;
+    std::vector<ServiceAnnouncement> services;
 
     bool operator==(const PresenceEntry&) const = default;
 };
@@ -85,8 +135,8 @@ struct PresenceEntry {
 [[nodiscard]] bool presence_lan_endpoint_valid(std::string_view text, bool allow_loopback);
 
 /// Encode `entries` as PresenceSync payloads: msgpack maps
-/// {"entries": [{"node_id": "...", "seen": N, "lan"?: ["a.b.c.d:port", ...]},
-/// ...]}, each within kPresenceSyncMaxEntries and
+/// {"entries": [{"node_id": "...", "seen": N, "lan"?: ["a.b.c.d:port", ...],
+/// "services"?: [{"name", "kind", "port", "models"?}, ...]}, ...]}, each within kPresenceSyncMaxEntries and
 /// kPresenceSyncMaxPayloadBytes. Entries whose node id fails
 /// presence_node_id_valid or whose time is 0 are left out. `lan` is present
 /// only when the entry has LAN endpoints; an endpoint that fails
@@ -100,7 +150,9 @@ struct PresenceEntry {
 /// empty, larger than kPresenceSyncMaxPayloadBytes, not msgpack, not the
 /// map above, has no entries or more than kPresenceSyncMaxEntries, or has an
 /// entry whose node id fails presence_node_id_valid, whose `seen` is not a
-/// positive integer, or whose `lan` is present and is not an array of at
+/// positive integer, whose `services` is present and fails
+/// parse_presence_services (a sender before the field sends none, and an
+/// older receiver ignores the key), or whose `lan` is present and is not an array of at
 /// most kDevicePresenceMaxLanEndpoints distinct strings that pass
 /// presence_lan_endpoint_valid without loopback. An entry without `lan` (a
 /// sender from before the field) decodes with no LAN endpoints. Unknown keys
@@ -143,6 +195,7 @@ public:
         bool became_online{false};  ///< the device was not online before
         bool locally_new{false};    ///< this server had not heard it within the window
         bool lan_changed{false};    ///< the listed LAN endpoints differ from before
+        bool services_changed{false};  ///< the listed services differ from before
     };
 
     /// The outcome of merge_remote.
@@ -151,6 +204,7 @@ public:
         std::size_t ahead{0};       ///< entries ignored: beyond kDevicePresenceMaxSkewSec
         bool        became_online{false};
         bool        lan_changed{false};  ///< a device's listed LAN endpoints changed
+        bool        services_changed{false};  ///< a device's listed services changed
     };
 
     /// The outcome of sweep.
@@ -168,8 +222,15 @@ public:
     /// (presence_lan_endpoint_valid) and the count
     /// (kDevicePresenceMaxLanEndpoints). Calls the changed hook when the
     /// device becomes online or its listed LAN endpoints change.
+    ///
+    /// `services` works the same way for the announced services: nullopt
+    /// leaves the stored list, an empty list removes it, any other list
+    /// replaces it and restarts its kDevicePresenceServicesTtlSec. The caller
+    /// must have validated it (presence_services_valid) and authenticated the
+    /// device as the owner of the node.
     LocalResult record_local(const std::string& node_id, uint64_t now,
-                             std::optional<std::vector<std::string>> lan = std::nullopt);
+                             std::optional<std::vector<std::string>> lan = std::nullopt,
+                             std::optional<std::vector<ServiceAnnouncement>> services = std::nullopt);
 
     /// Merge presence from another Tier 1 server, by maximum time. A time
     /// more than kDevicePresenceMaxSkewSec after `now` is ignored, a later
@@ -189,6 +250,11 @@ public:
     /// server, within kDevicePresenceLanTtlSec of `now`; empty when none.
     [[nodiscard]] std::vector<std::string> lan_endpoints(const std::string& node_id,
                                                          uint64_t now) const;
+
+    /// The services `node_id` announced, here or at another Tier 1 server,
+    /// within kDevicePresenceServicesTtlSec of `now`; empty when none.
+    [[nodiscard]] std::vector<ServiceAnnouncement> services(const std::string& node_id,
+                                                            uint64_t now) const;
 
     /// The devices this server heard itself within kDevicePresenceOnlineSec
     /// of `now`, with the latest local time of each and the LAN endpoints
@@ -219,6 +285,8 @@ private:
         bool                     online{false};  ///< online state as of the last update or sweep
         std::vector<std::string> lan;            ///< LAN endpoints reported with the presence
         uint64_t                 lan_at{0};      ///< time `lan` was reported; 0 when none
+        std::vector<ServiceAnnouncement> services;  ///< announced with the presence
+        uint64_t                 services_at{0};    ///< time `services` were announced; 0 when none
     };
 
     /// The entry for `node_id`, created when absent and the table has room.

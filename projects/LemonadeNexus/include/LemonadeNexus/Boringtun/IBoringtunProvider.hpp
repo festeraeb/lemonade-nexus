@@ -22,6 +22,11 @@ struct BoringtunPeer {
     /// Unix seconds of the last authenticated packet, keepalives included;
     /// 0 when the provider does not track it or nothing arrived yet.
     uint64_t    last_rx{0};
+    /// Round trip of this side's newest completed handshake, in ms (-1 when
+    /// this side has not completed one as initiator). Responders have none.
+    int32_t     rtt_ms{-1};
+    /// Unix seconds when rtt_ms was taken; 0 when there is no sample.
+    uint64_t    rtt_at{0};
     uint64_t    rx_bytes{0};
     uint64_t    tx_bytes{0};
     uint16_t    persistent_keepalive{25};

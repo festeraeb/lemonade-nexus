@@ -2742,6 +2742,137 @@ TEST(MeshPeerWaiters, NotifyWakesAndShutdownRefuses) {
     EXPECT_EQ(waiters.waiting(), 0u);
 }
 
+// A heartbeat may announce what the device offers: a short list of services
+// (name, kind, port, models). The server takes it only from the node's own
+// key, bounds and validates it, keeps it in memory, and lists it as
+// `services` only in the entries of callers that already list the node. A
+// change in it changes peers_revision.
+TEST_F(MeshPeersConnectTest, HeartbeatServicesReachOnlyListedPeers) {
+    const auto peer_key = principal();
+    add("mc_peer", "mc_group", tree::NodeType::Endpoint, {{caller, {"connect_private"}}},
+        peer_key);
+    const auto outsider = principal();
+    add("mc_outsider", "mc_group", tree::NodeType::Endpoint, {{outsider, {"read"}}});
+
+    const auto token = [this](const std::string& node, const std::string& pubkey) {
+        const auto now = std::chrono::system_clock::now();
+        return jwt::create()
+            .set_issuer("lemonade-nexus")
+            .set_subject(node)
+            .set_issued_at(now)
+            .set_expires_at(now + std::chrono::hours{1})
+            .set_payload_claim("pubkey", jwt::claim(pubkey))
+            .sign(jwt::algorithm::hs256{jwt_secret});
+    };
+    const auto heartbeat = [&](const std::string& node, const std::string& pubkey,
+                               const json& body) {
+        httplib::Client cli("127.0.0.1", mesh_port);
+        auto res = cli.Post("/api/mesh/heartbeat",
+                            {{"Authorization", "Bearer " + token(node, pubkey)}}, body.dump(),
+                            "application/json");
+        EXPECT_NE(res, nullptr);
+        return res ? res->status : 0;
+    };
+    const auto revision = [&] {
+        httplib::Client cli("127.0.0.1", mesh_port);
+        const json body = {{"node_id", "mc_self"}, {"endpoint", ""}};
+        auto res = cli.Post("/api/mesh/heartbeat",
+                            {{"Authorization", "Bearer " + token("mc_self", caller)}},
+                            body.dump(), "application/json");
+        EXPECT_NE(res, nullptr);
+        if (!res || res->status != 200) return std::string{"<refused>"};
+        return json::parse(res->body).value("peers_revision", std::string{});
+    };
+    const auto services_of_peer = [&] {
+        json body;
+        listed(&body);
+        for (const auto& p : body["peers"]) {
+            if (p["node_id"] == "mc_peer") return p.value("services", json(nullptr));
+        }
+        return json("<peer not listed>");
+    };
+
+    ASSERT_EQ(heartbeat("mc_peer", peer_key, {{"node_id", "mc_peer"}}), 200);
+    const auto before = revision();
+    EXPECT_EQ(services_of_peer(), json::array()) << "a device that announced nothing lists services";
+
+    const json services = json::array(
+        {{{"name", "ollama"}, {"kind", "llm"}, {"port", 11434},
+          {"models", json::array({"qwen3:8b", "llama-3.1-8b-instruct"})}},
+         {{"name", "status"}, {"kind", "http"}, {"port", 8080}}});
+    ASSERT_EQ(heartbeat("mc_peer", peer_key, {{"node_id", "mc_peer"}, {"services", services}}),
+              200);
+    const json expected = json::array(
+        {{{"name", "ollama"}, {"kind", "llm"}, {"port", 11434},
+          {"models", json::array({"qwen3:8b", "llama-3.1-8b-instruct"})}},
+         {{"name", "status"}, {"kind", "http"}, {"port", 8080}, {"models", json::array()}}});
+    EXPECT_EQ(services_of_peer(), expected);
+    const auto announced = revision();
+    EXPECT_NE(announced, before) << "a service change left peers_revision as it was";
+    EXPECT_EQ(revision(), announced);
+
+    // Bounds and types: every bad list is refused and the stored one stays.
+    json nine = json::array();
+    for (int i = 0; i < 9; ++i) {
+        nine.push_back({{"name", "s" + std::to_string(i)}, {"kind", "http"}, {"port", 80}});
+    }
+    json nine_models = json::array();
+    for (int i = 0; i < 9; ++i) nine_models.push_back("m" + std::to_string(i));
+    const std::vector<json> refused = {
+        nine,                                                               // too many services
+        json::array({{{"name", "a"}, {"kind", "llm"}, {"port", 0}}}),       // port 0
+        json::array({{{"name", "a"}, {"kind", "llm"}, {"port", 65536}}}),   // port out of range
+        json::array({{{"name", "a"}, {"kind", "llm"}, {"port", "80"}}}),    // port not a number
+        json::array({{{"name", "a"}, {"kind", "llm"}}}),                    // no port
+        json::array({{{"name", ""}, {"kind", "llm"}, {"port", 80}}}),       // empty name
+        json::array({{{"name", std::string(33, 'a')}, {"kind", "llm"}, {"port", 80}}}),
+        json::array({{{"name", "a"}, {"kind", std::string(17, 'a')}, {"port", 80}}}),
+        json::array({{{"name", "a b"}, {"kind", "llm"}, {"port", 80}}}),    // space
+        json::array({{{"name", "<b>"}, {"kind", "llm"}, {"port", 80}}}),    // markup
+        json::array({{{"name", "a"}, {"kind", "llm"}, {"port", 80}, {"extra", 1}}}),
+        json::array({{{"name", "a"}, {"kind", "llm"}, {"port", 80}, {"models", nine_models}}}),
+        json::array({{{"name", "a"}, {"kind", "llm"}, {"port", 80},
+                      {"models", json::array({std::string(65, 'm')})}}}),
+        json::array({{{"name", "a"}, {"kind", "llm"}, {"port", 80},
+                      {"models", json::array({"bad model"})}}}),
+        json::array({{{"name", "a"}, {"kind", "llm"}, {"port", 80},
+                      {"models", json::array({7})}}}),
+        json::array({{{"name", "a"}, {"kind", "llm"}, {"port", 80}},
+                     {{"name", "a"}, {"kind", "http"}, {"port", 81}}}),     // repeated name
+        json::array({"ollama"}),                                            // not an object
+        json("ollama"),                                                     // not an array
+    };
+    for (const auto& bad : refused) {
+        EXPECT_EQ(heartbeat("mc_peer", peer_key, {{"node_id", "mc_peer"}, {"services", bad}}), 400)
+            << bad.dump();
+    }
+    EXPECT_EQ(services_of_peer(), expected);
+
+    // Only the node's own key announces: another session for the node is refused.
+    EXPECT_EQ(heartbeat("mc_peer", principal(), {{"node_id", "mc_peer"}, {"services", services}}),
+              403);
+    EXPECT_EQ(services_of_peer(), expected);
+
+    // An older client sends no field: the list stays; an empty array removes it.
+    ASSERT_EQ(heartbeat("mc_peer", peer_key, {{"node_id", "mc_peer"}}), 200);
+    EXPECT_EQ(services_of_peer(), expected);
+    ASSERT_EQ(heartbeat("mc_peer", peer_key, {{"node_id", "mc_peer"}, {"services", json::array()}}),
+              200);
+    EXPECT_EQ(services_of_peer(), json::array());
+    EXPECT_EQ(revision(), before);
+
+    // A caller that does not list the peer sees neither the peer nor its services.
+    ASSERT_EQ(heartbeat("mc_peer", peer_key, {{"node_id", "mc_peer"}, {"services", services}}),
+              200);
+    httplib::Client cli("127.0.0.1", mesh_port);
+    auto res = cli.Get("/api/mesh/peers/mc_outsider",
+                       httplib::Headers{{"Authorization", "Bearer " + token("mc_outsider", outsider)}});
+    ASSERT_NE(res, nullptr);
+    ASSERT_EQ(res->status, 200) << res->body;
+    EXPECT_EQ(res->body.find("ollama"), std::string::npos) << res->body;
+    EXPECT_EQ(res->body.find("mc_peer"), std::string::npos) << res->body;
+}
+
 // A heartbeat may report the device's LAN endpoints. The server accepts only
 // private "a.b.c.d:port" addresses from the node's own key, keeps them in
 // memory, and lists them only in the entries of callers that already list
@@ -3250,6 +3381,27 @@ TEST_F(PublicStatsTest, CountsAreReusedWithinTheCacheWindow) {
     EXPECT_EQ(counts.devices, 2u);
 }
 
+// Both public status answers carry the server's start time and uptime, so a
+// status page need not guess them. Old servers send neither field.
+TEST_F(PublicStatsTest, StatusAnswersCarryStartedAtAndUptime) {
+    const auto before = api::epoch_seconds();
+    for (const char* path : {"/api/stats", "/api/health"}) {
+        httplib::Client cli("127.0.0.1", pub_port);
+        auto res = cli.Get(path);
+        ASSERT_NE(res, nullptr) << path;
+        ASSERT_EQ(res->status, 200) << path;
+        const auto body = json::parse(res->body);
+        ASSERT_TRUE(body.contains("started_at")) << path << " " << body.dump();
+        ASSERT_TRUE(body.contains("uptime_sec")) << path << " " << body.dump();
+        const auto started = body["started_at"].get<uint64_t>();
+        const auto uptime = body["uptime_sec"].get<uint64_t>();
+        EXPECT_GT(started, 0u) << path;
+        EXPECT_LE(started, before) << path;
+        EXPECT_LE(uptime, api::epoch_seconds() - started + 1) << path;
+        EXPECT_GE(uptime + 1, before - started) << path;
+    }
+}
+
 // A server that is not a current Tier 1 member holds no shared presence, so
 // it reports no network counts rather than zeros.
 TEST_F(PublicStatsTest, AServerOutsideTier1ReportsNoNetworkCounts) {
@@ -3381,27 +3533,6 @@ TEST_F(HttpEndpointTest, ARepeatOfAPendingJoinWaitsForItsOpInsteadOfOrderingAnot
     std::vector<tree::TreeOp> ops;
     const auto submitter_key = crypto->ed25519_keygen();
     tree::TreeOpSubmitter ordered(
-// Both public status answers carry the server's start time and uptime, so a
-// status page need not guess them. Old servers send neither field.
-TEST_F(PublicStatsTest, StatusAnswersCarryStartedAtAndUptime) {
-    const auto before = api::epoch_seconds();
-    for (const char* path : {"/api/stats", "/api/health"}) {
-        httplib::Client cli("127.0.0.1", pub_port);
-        auto res = cli.Get(path);
-        ASSERT_NE(res, nullptr) << path;
-        ASSERT_EQ(res->status, 200) << path;
-        const auto body = json::parse(res->body);
-        ASSERT_TRUE(body.contains("started_at")) << path << " " << body.dump();
-        ASSERT_TRUE(body.contains("uptime_sec")) << path << " " << body.dump();
-        const auto started = body["started_at"].get<uint64_t>();
-        const auto uptime = body["uptime_sec"].get<uint64_t>();
-        EXPECT_GT(started, 0u) << path;
-        EXPECT_LE(started, before) << path;
-        EXPECT_LE(uptime, api::epoch_seconds() - started + 1) << path;
-        EXPECT_GE(uptime + 1, before - started) << path;
-    }
-}
-
         *tree, *crypto, security::NetworkId{}, submitter_key,
         [&](tree::TreeOp op) {
             tree::TreeOpAdmission admission;

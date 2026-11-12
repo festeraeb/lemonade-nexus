@@ -142,6 +142,25 @@ the old binary as an invalid baseline.
   server shows its LAN endpoints only in the peer lists of that server, as
   before; a device on an N+1 server shows them on every N+1 server. The peer
   list field `local_endpoints` keeps its shape.
+- **Announced services.** A heartbeat may carry `services`: at most eight
+  `{name, kind, port, models?}` entries (names of 1 to 32 and kinds of 1 to
+  16 characters from `[A-Za-z0-9._-]`, port 1 to 65535, at most eight model
+  names of 1 to 64 characters). The server refuses a malformed list with
+  HTTP `400`, accepts it only from the node's own key, and lists it as
+  `services` in the peer entries of devices that list the node (an empty
+  array when none). A `PresenceSync` entry may carry the same list under
+  `services`; a release from before the field ignores the key, and a release
+  with it accepts an entry without the key as presence with no services. A
+  heartbeat without the field leaves the stored list as it is. During a
+  rollout, a device shows its services only on N+1 servers. An older SDK
+  ignores the new peer field.
+- **Server uptime.** `GET /api/health` and `GET /api/stats` add `started_at`
+  (Unix seconds) and `uptime_sec`. A client that reads neither field is not
+  affected, and a client must accept an older server that sends neither.
+- **Peer latency and server path.** The SDK reports `latency_ms` and
+  `latency_at` (Unix seconds of the sample) per peer, and `server_path` is
+  never empty (`"none"` while the mesh is off). These are SDK outputs only;
+  no wire message changes.
 - **Tree op link extension.** A `Join` with a link token and an
   `AcceptInvite` from N+1 append a link extension to the canonical op
   encoding. An op without it encodes exactly as before, and N+1

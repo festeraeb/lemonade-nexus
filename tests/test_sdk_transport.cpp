@@ -322,10 +322,15 @@ protected:
     std::vector<std::string> heartbeat_endpoints;  // the "endpoint" of each heartbeat
     // The "local_endpoints" of each heartbeat (null when absent).
     std::vector<nlohmann::json> heartbeat_lan;
+    std::vector<nlohmann::json> heartbeat_services;
 
     std::vector<std::string> heartbeats() {
         std::lock_guard lock(heartbeat_mtx);
         return heartbeat_endpoints;
+    }
+    std::vector<nlohmann::json> heartbeats_services() {
+        std::lock_guard lock(heartbeat_mtx);
+        return heartbeat_services;
     }
     std::vector<nlohmann::json> heartbeat_local_endpoints() {
         std::lock_guard lock(heartbeat_mtx);
@@ -823,6 +828,9 @@ protected:
                 heartbeat_lan.push_back(body.is_object() && body.contains("local_endpoints")
                                             ? body["local_endpoints"]
                                             : nlohmann::json(nullptr));
+                heartbeat_services.push_back(body.is_object() && body.contains("services")
+                                                 ? body["services"]
+                                                 : nlohmann::json(nullptr));
             }
             nlohmann::json answer{{"success", true}};
             if (const auto next_epoch = departure_next_epoch.load(); next_epoch != 0) {
@@ -1172,6 +1180,32 @@ TEST_F(SdkMeshPrivateApiTest, ATakenDeviceNameFallsBackToTheServerDefault) {
     EXPECT_EQ(checks[0].value("name", ""), "Work PC");
     EXPECT_EQ(checks[0].value("link_token", ""), "12345678");
     client.disable_mesh();
+}
+
+// A device announces its services in the heartbeat: none before the
+// application sets them (an older server keeps what it has), the list after,
+// and an empty list removes it. A list beyond the bounds is refused at once.
+TEST_F(SdkMeshPrivateApiTest, HeartbeatsCarryTheAnnouncedServices) {
+    LN_REQUIRE_TEST_TRUST();
+    auto client = joined_client();
+    ASSERT_TRUE(client->mesh_heartbeat(kNodeId, "").ok);
+    ASSERT_FALSE(heartbeats_services().empty());
+    EXPECT_TRUE(heartbeats_services().back().is_null()) << "services sent before they were set";
+
+    const std::vector<lnsdk::ServiceAnnouncement> list{{"ollama", "llm", 11434, {"qwen3:8b"}}};
+    ASSERT_TRUE(client->set_announced_services(list));
+    ASSERT_TRUE(client->mesh_heartbeat(kNodeId, "").ok);
+    EXPECT_EQ(heartbeats_services().back(),
+              nlohmann::json::parse(R"([{"name":"ollama","kind":"llm","port":11434,"models":["qwen3:8b"]}])"));
+
+    EXPECT_FALSE(client->set_announced_services({{"bad name", "llm", 1, {}}}));
+    ASSERT_TRUE(client->mesh_heartbeat(kNodeId, "").ok);
+    EXPECT_EQ(heartbeats_services().back().size(), 1u) << "a refused list replaced the old one";
+
+    ASSERT_TRUE(client->set_announced_services({}));
+    ASSERT_TRUE(client->mesh_heartbeat(kNodeId, "").ok);
+    EXPECT_EQ(heartbeats_services().back(), nlohmann::json::array());
+    client->disable_mesh();
 }
 
 // Tier 1 rotates a member out at an epoch boundary. A session bound to that
@@ -3101,9 +3135,82 @@ TEST(SdkMeshTier1Recheck, AMissedMemberIsVerifiedAgainWithinAMinute) {
 TEST(SdkMeshStatusTest, ServerPathWithoutTheWssRungFollowsTheUdpTunnel) {
     EXPECT_EQ(lnsdk::reported_server_path("", true, true), "direct");
     EXPECT_EQ(lnsdk::reported_server_path("", true, false), "none");
-    EXPECT_EQ(lnsdk::reported_server_path("", false, false), "");
+    // The mesh off is "none" too: the field is never empty.
+    EXPECT_EQ(lnsdk::reported_server_path("", false, false), "none");
     EXPECT_EQ(lnsdk::reported_server_path("wss", true, true), "wss");
     EXPECT_EQ(lnsdk::reported_server_path("none", true, true), "none");
+}
+
+// A client with no mesh enabled still reports a path, never an empty string.
+TEST(SdkMeshStatusTest, ClientWithoutAMeshReportsServerPathNone) {
+    lnsdk::LemonadeNexusClient client{lnsdk::ServerConfig("127.0.0.1", 1, false)};
+    const auto status = client.mesh_status();
+    EXPECT_FALSE(status.is_up);
+    EXPECT_EQ(status.server_path, "none");
+}
+
+// A peer's latency is sampled at once (no sample, never probed), refreshed
+// when the sample is a minute old, and a peer that never answers is probed
+// at most once a minute.
+TEST(SdkMeshStatusTest, LatencyProbeIsDueAtOnceThenOnceAMinute) {
+    using namespace std::chrono_literals;
+    EXPECT_TRUE(lnsdk::latency_probe_due(-1, std::nullopt));
+    EXPECT_FALSE(lnsdk::latency_probe_due(-1, 5s));
+    EXPECT_TRUE(lnsdk::latency_probe_due(-1, lnsdk::kLatencyRefresh));
+    EXPECT_FALSE(lnsdk::latency_probe_due(10, std::nullopt));
+    EXPECT_TRUE(lnsdk::latency_probe_due(lnsdk::kLatencyRefresh.count(), std::nullopt));
+    EXPECT_FALSE(lnsdk::latency_probe_due(lnsdk::kLatencyRefresh.count(), 5s));
+}
+
+// A peer's latency sample carries its time, and the JSON round trip keeps it.
+TEST(SdkMeshStatusTest, MeshPeerKeepsLatencySampleTime) {
+    lnsdk::MeshPeer peer;
+    EXPECT_EQ(peer.latency_ms, -1);
+    EXPECT_EQ(peer.latency_at, 0);
+    peer.latency_ms = 12;
+    peer.latency_at = 1760000000;
+    const nlohmann::json j = peer;
+    EXPECT_EQ(j.at("latency_at").get<int64_t>(), 1760000000);
+    const auto back = j.get<lnsdk::MeshPeer>();
+    EXPECT_EQ(back.latency_ms, 12);
+    EXPECT_EQ(back.latency_at, 1760000000);
+    EXPECT_EQ(lnsdk::latency_age_sec(back, 1760000042), 42);
+    EXPECT_EQ(lnsdk::latency_age_sec(lnsdk::MeshPeer{}, 1760000042), -1);
+    // An older peer list has no latency_at: it reads as no sample.
+    EXPECT_EQ(nlohmann::json::parse(R"({"latency_ms":7})").get<lnsdk::MeshPeer>().latency_at, 0);
+}
+
+// The SDK refuses an announced service list beyond the server's bounds, so a
+// heartbeat is never refused for it, and reads the peers' lists back.
+TEST(SdkMeshStatusTest, AnnouncedServicesAreBoundedAndRoundTrip) {
+    lnsdk::ServiceAnnouncement ok{"ollama", "llm", 11434, {"qwen3:8b", "org/m@v1"}};
+    EXPECT_TRUE(lnsdk::services_announceable({}));
+    EXPECT_TRUE(lnsdk::services_announceable({ok, {"web", "http", 8080, {}}}));
+    auto bad = ok;
+    bad.port = 0;
+    EXPECT_FALSE(lnsdk::services_announceable({bad}));
+    bad = ok;
+    bad.name = "has space";
+    EXPECT_FALSE(lnsdk::services_announceable({bad}));
+    bad = ok;
+    bad.models.assign(lnsdk::kMaxServiceModels + 1, "m");
+    EXPECT_FALSE(lnsdk::services_announceable({bad}));
+    bad = ok;
+    bad.models = {std::string(lnsdk::kMaxServiceModelNameLen + 1, 'm')};
+    EXPECT_FALSE(lnsdk::services_announceable({bad}));
+    EXPECT_FALSE(lnsdk::services_announceable({ok, ok}));  // repeated name
+    std::vector<lnsdk::ServiceAnnouncement> many;
+    for (std::size_t i = 0; i <= lnsdk::kMaxAnnouncedServices; ++i) {
+        many.push_back({"s" + std::to_string(i), "http", 80, {}});
+    }
+    EXPECT_FALSE(lnsdk::services_announceable(many));
+
+    lnsdk::MeshPeer peer;
+    peer.services = {ok};
+    const nlohmann::json j = peer;
+    EXPECT_EQ(j.get<lnsdk::MeshPeer>().services, peer.services);
+    // A peer list from a server before the field has no services.
+    EXPECT_TRUE(nlohmann::json::parse(R"({"node_id":"n"})").get<lnsdk::MeshPeer>().services.empty());
 }
 
 // A heartbeat answered "node not found" means the server no longer knows this

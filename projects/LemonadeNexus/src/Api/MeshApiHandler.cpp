@@ -77,12 +77,15 @@ std::vector<tree::TreeNode> connectable_endpoints(const tree::rules::NodeMap& no
 /// hostname, or online state (`is_online`, from `presence`) changed. The
 /// presence time itself is left out, so a device that stays online changes
 /// nothing. `endpoints` and `relays` are the listed peers in list order;
-/// `local` holds the LAN endpoints of listed endpoints that have any. XXH3
+/// `local` holds the LAN endpoints of listed endpoints that have any, and
+/// `services` the announced service list (as JSON text) of those that have
+/// one. XXH3
 /// over length-prefixed fields; a change detector, not a security value.
 std::string peers_revision(const std::vector<tree::TreeNode>& endpoints,
                            const std::vector<const tree::TreeNode*>& relays,
                            const gossip::DevicePresence& presence,
                            const std::unordered_map<std::string, std::vector<std::string>>& local,
+                           const std::unordered_map<std::string, std::string>& services,
                            uint64_t now) {
     std::string buf;
     const auto field = [&buf](std::string_view text) {
@@ -108,6 +111,11 @@ std::string peers_revision(const std::vector<tree::TreeNode>& endpoints,
             buf += 'L';
             buf += std::to_string(lan->second.size());
             for (const auto& endpoint : lan->second) field(endpoint);
+        }
+        // Likewise only a peer with announced services adds this part.
+        if (const auto listed = services.find(n.id); listed != services.end()) {
+            buf += 'S';
+            field(listed->second);
         }
     }
     for (const auto* n : relays) peer(*n, 'R', true);
@@ -368,6 +376,7 @@ std::string MeshApiHandler::caller_peers_revision(const std::string& caller_pubk
     std::vector<tree::TreeNode> reachable;
     std::vector<const tree::TreeNode*> relays;
     std::unordered_map<std::string, std::vector<std::string>> local;
+    std::unordered_map<std::string, std::string> services;
     if (!node.parent_id.empty()) {
         reachable = ctx_.tree.collect_subtree(node.parent_id);
         endpoints = connectable_endpoints(ctx_.tree.nodes_snapshot(), caller_pubkey, node,
@@ -382,9 +391,12 @@ std::string MeshApiHandler::caller_peers_revision(const std::string& caller_pubk
             if (auto lan = presence.lan_endpoints(n.id, now); !lan.empty()) {
                 local.emplace(n.id, std::move(lan));
             }
+            if (auto listed = presence.services(n.id, now); !listed.empty()) {
+                services.emplace(n.id, gossip::presence_services_json(listed).dump());
+            }
         }
     }
-    return peers_revision(endpoints, relays, ctx_.gossip.device_presence(), local, now);
+    return peers_revision(endpoints, relays, ctx_.gossip.device_presence(), local, services, now);
 }
 
 void MeshApiHandler::do_register_routes([[maybe_unused]] httplib::Server& pub,
@@ -643,6 +655,9 @@ void MeshApiHandler::do_register_routes([[maybe_unused]] httplib::Server& pub,
             // server or to another Tier 1 server (PresenceSync). Only a
             // listed peer's entry carries them.
             peer["local_endpoints"]  = presence.lan_endpoints(sibling.id, now);
+            // What the peer announced it offers (name, kind, port, models);
+            // empty for a device that announces none. Informational only.
+            peer["services"] = gossip::presence_services_json(presence.services(sibling.id, now));
             peer["relay_endpoint"]   = "";  // filled by relay discovery
             peer["is_online"]        = seen.online;
             peer["last_seen"]        = seen.last_seen;
@@ -698,7 +713,15 @@ void MeshApiHandler::do_register_routes([[maybe_unused]] httplib::Server& pub,
     // every Tier 1 server for kDevicePresenceOnlineSec after it.
     //
     // Body: { "node_id": "...", "endpoint": "ip:port",
-    //         "local_endpoints"?: ["192.168.1.20:41234", ...] }
+    //         "local_endpoints"?: ["192.168.1.20:41234", ...],
+    //         "services"?: [{"name", "kind", "port", "models"?: [...]}, ...] }
+    // services is what the device offers, at most kDevicePresenceMaxServices
+    // entries within the bounds of presence_services_valid. A malformed list
+    // refuses the heartbeat. Only the node's own management key sets it, as
+    // for local_endpoints. It is kept with the device's presence like the
+    // LAN endpoints (memory, kDevicePresenceServicesTtlSec, PresenceSync) and
+    // listed as `services` in the peer entries of callers that list the node.
+    // An empty array removes it; an absent field leaves it as it is.
     // local_endpoints are the device's LAN addresses with its dataplane port
     // (parse_mesh_local_endpoints): private IPv4 addresses only, at most
     // kMaxMeshLocalEndpoints. A malformed list refuses the heartbeat. The
@@ -754,6 +777,16 @@ void MeshApiHandler::do_register_routes([[maybe_unused]] httplib::Server& pub,
             }
         }
 
+        std::optional<std::vector<gossip::ServiceAnnouncement>> hb_services;
+        if (const auto field = body.find("services"); field != body.end()) {
+            hb_services = gossip::parse_presence_services(*field);
+            if (!hb_services) {
+                error_response(res, "invalid services (expected at most 8 {name, kind, port, "
+                                    "models?} objects with short plain-text values)");
+                return;
+            }
+        }
+
         // Verify the node exists
         auto node_opt = ctx_.tree.get_node(hb_node_id);
         if (!node_opt) {
@@ -771,7 +804,7 @@ void MeshApiHandler::do_register_routes([[maybe_unused]] httplib::Server& pub,
         }
         // LAN endpoints follow the SetEndpoint rule: only the node's own
         // management key reports them.
-        if (hb_local && (node_opt->mgmt_pubkey.empty() ||
+        if ((hb_local || hb_services) && (node_opt->mgmt_pubkey.empty() ||
                          tree::canonical_principal(node_opt->mgmt_pubkey) !=
                              tree::canonical_principal(normalize_pubkey(claims.pubkey)))) {
             error_response(res, "insufficient permissions", 403);
@@ -782,7 +815,8 @@ void MeshApiHandler::do_register_routes([[maybe_unused]] httplib::Server& pub,
         // passed, so the list belongs to this node), whatever happens to the
         // endpoint write below.
         const auto now = epoch_seconds();
-        (void)ctx_.gossip.record_device_presence(hb_node_id, now, std::move(hb_local));
+        (void)ctx_.gossip.record_device_presence(hb_node_id, now, std::move(hb_local),
+                                            std::move(hb_services));
 
         // The endpoint write is a SetEndpoint tree operation. A heartbeat
         // does not wait for the commit: it is periodic and best-effort,

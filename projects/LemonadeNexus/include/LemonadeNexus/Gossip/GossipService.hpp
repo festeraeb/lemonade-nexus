@@ -1029,8 +1029,12 @@ public:
     /// endpoints changed, it sends the entry to every Tier 1 peer at once
     /// instead of at the next kPresenceSyncIntervalSec. Returns true when the
     /// device became online. Thread-safe: the send runs on the io thread.
+    /// `services` is the announced service list (DevicePresence::record_local):
+    /// nullopt leaves it, an empty list removes it; a change is sent at once
+    /// like a LAN change.
     bool record_device_presence(const std::string& node_id, uint64_t now,
-                                std::optional<std::vector<std::string>> lan = std::nullopt);
+                                std::optional<std::vector<std::string>> lan = std::nullopt,
+                                std::optional<std::vector<ServiceAnnouncement>> services = std::nullopt);
 
     /// Drop the replicated envelopes of a deleted account: every envelope of a
     /// group in `group_ids`, and every envelope addressed to a canonical key

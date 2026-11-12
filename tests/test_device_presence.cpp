@@ -439,3 +439,141 @@ TEST(PresenceSyncCodecTest, LanEndpointsRoundTripAndInvalidOnesAreRefused) {
         {{"entries", {{{"node_id", "dev1"}, {"seen", kNow}},
                       {{"node_id", "dev2"}, {"seen", kNow}, {"lan", {"8.8.8.8:1"}}}}}})));
 }
+
+// --- Announced services -----------------------------------------------------
+
+namespace {
+ServiceAnnouncement svc(const std::string& name, const std::string& kind, uint16_t port,
+                        std::vector<std::string> models = {}) {
+    return {name, kind, port, std::move(models)};
+}
+}  // namespace
+
+TEST(DevicePresenceTest, ServiceRuleBoundsEveryField) {
+    EXPECT_TRUE(presence_service_valid(svc("ollama", "llm", 11434, {"qwen3:8b", "org/model@v1+q4"})));
+    EXPECT_TRUE(presence_service_valid(svc(std::string(32, 'a'), std::string(16, 'k'), 65535)));
+    EXPECT_FALSE(presence_service_valid(svc("", "llm", 80)));
+    EXPECT_FALSE(presence_service_valid(svc(std::string(33, 'a'), "llm", 80)));
+    EXPECT_FALSE(presence_service_valid(svc("a", std::string(17, 'k'), 80)));
+    EXPECT_FALSE(presence_service_valid(svc("a", "llm", 0)));
+    EXPECT_FALSE(presence_service_valid(svc("a b", "llm", 80)));
+    EXPECT_FALSE(presence_service_valid(svc("a", "l\nm", 80)));
+    EXPECT_FALSE(presence_service_valid(svc("a", "llm", 80, {"bad model"})));
+    EXPECT_FALSE(presence_service_valid(svc("a", "llm", 80, {"<script>"})));
+    EXPECT_FALSE(presence_service_valid(svc("a", "llm", 80, {std::string(65, 'm')})));
+    EXPECT_FALSE(presence_service_valid(
+        svc("a", "llm", 80, {"1", "2", "3", "4", "5", "6", "7", "8", "9"})));
+
+    std::vector<ServiceAnnouncement> many;
+    for (std::size_t i = 0; i < kDevicePresenceMaxServices; ++i) many.push_back(svc("s" + std::to_string(i), "http", 80));
+    EXPECT_TRUE(presence_services_valid(many));
+    many.push_back(svc("extra", "http", 80));
+    EXPECT_FALSE(presence_services_valid(many));
+    EXPECT_FALSE(presence_services_valid({svc("a", "http", 80), svc("a", "llm", 81)}));
+}
+
+TEST(DevicePresenceTest, ServicesFollowTheHeartbeatAndExpire) {
+    const std::vector<ServiceAnnouncement> list{svc("ollama", "llm", 11434, {"qwen3:8b"})};
+    DevicePresence p;
+    int calls = 0;
+    p.set_changed_hook([&calls] { ++calls; });
+
+    auto r = p.record_local("dev1", kNow, std::nullopt, list);
+    EXPECT_TRUE(r.accepted);
+    EXPECT_TRUE(r.services_changed);
+    EXPECT_EQ(calls, 1);
+    EXPECT_EQ(p.services("dev1", kNow), list);
+    EXPECT_EQ(p.services("dev1", kNow + kDevicePresenceServicesTtlSec - 1), list);
+    EXPECT_TRUE(p.services("dev1", kNow + kDevicePresenceServicesTtlSec).empty());
+    EXPECT_TRUE(p.services("other", kNow).empty());
+
+    // Same list again: not a change. No field: the list stays.
+    r = p.record_local("dev1", kNow + 3, std::nullopt, list);
+    EXPECT_FALSE(r.services_changed);
+    r = p.record_local("dev1", kNow + 6);
+    EXPECT_FALSE(r.services_changed);
+    EXPECT_EQ(p.services("dev1", kNow + 6), list);
+
+    auto local = p.local_online(kNow + 6);
+    ASSERT_EQ(local.size(), 1u);
+    EXPECT_EQ(local[0].services, list);
+
+    // A new list is a change; an empty list removes it.
+    const std::vector<ServiceAnnouncement> moved{svc("web", "http", 8080)};
+    r = p.record_local("dev1", kNow + 9, std::nullopt, moved);
+    EXPECT_TRUE(r.services_changed);
+    EXPECT_EQ(p.services("dev1", kNow + 9), moved);
+    r = p.record_local("dev1", kNow + 12, std::nullopt, std::vector<ServiceAnnouncement>{});
+    EXPECT_TRUE(r.services_changed);
+    EXPECT_TRUE(p.services("dev1", kNow + 12).empty());
+    r = p.record_local("dev1", kNow + 15, std::nullopt, std::vector<ServiceAnnouncement>{});
+    EXPECT_FALSE(r.services_changed);
+}
+
+TEST(DevicePresenceTest, MergedServicesFollowTheNewestPresence) {
+    const std::vector<ServiceAnnouncement> list{svc("ollama", "llm", 11434)};
+    DevicePresence p;
+    auto m = p.merge_remote({{"dev1", kNow, {}, list}}, kNow);
+    EXPECT_TRUE(m.services_changed);
+    EXPECT_EQ(p.services("dev1", kNow), list);
+    // An older entry changes nothing; a newer one without services removes them.
+    m = p.merge_remote({{"dev1", kNow - 1, {}, {}}}, kNow);
+    EXPECT_FALSE(m.services_changed);
+    EXPECT_EQ(p.services("dev1", kNow), list);
+    m = p.merge_remote({{"dev1", kNow + 1, {}, {}}}, kNow + 1);
+    EXPECT_TRUE(m.services_changed);
+    EXPECT_TRUE(p.services("dev1", kNow + 1).empty());
+    // Merged services are never relayed as local presence.
+    (void)p.merge_remote({{"dev2", kNow + 2, {}, list}}, kNow + 2);
+    EXPECT_TRUE(p.local_online(kNow + 2).empty());
+}
+
+TEST(PresenceSyncCodecTest, ServicesRoundTripAndInvalidOnesAreRefused) {
+    const std::vector<ServiceAnnouncement> list{svc("ollama", "llm", 11434, {"qwen3:8b"}),
+                                                svc("web", "http", 8080)};
+    const std::vector<PresenceEntry> entries{{"dev1", kNow, {}, list}, {"dev2", kNow - 1}};
+    const auto pages = encode_presence_sync(entries);
+    ASSERT_EQ(pages.size(), 1u);
+    const auto decoded = decode_presence_sync(pages[0]);
+    ASSERT_TRUE(decoded.has_value());
+    EXPECT_EQ(*decoded, entries);
+    const auto doc = nlohmann::json::from_msgpack(pages[0]);
+    EXPECT_FALSE(doc["entries"][1].contains("services")) << "an empty list was sent";
+
+    // An entry from a sender before the field decodes with no services.
+    const auto old = decode_presence_sync(msgpack_of({{"entries", {{{"node_id", "d"}, {"seen", kNow}}}}}));
+    ASSERT_TRUE(old.has_value());
+    EXPECT_TRUE((*old)[0].services.empty());
+
+    // The maximum list for every id stays within the byte bound.
+    std::vector<ServiceAnnouncement> big;
+    for (std::size_t i = 0; i < kDevicePresenceMaxServices; ++i) {
+        std::vector<std::string> models;
+        for (std::size_t k = 0; k < kDevicePresenceMaxServiceModels; ++k) {
+            models.push_back(std::string(kDevicePresenceMaxServiceModelLen, 'm'));
+        }
+        big.push_back(svc(std::string(kDevicePresenceMaxServiceName - 1, 'a') + std::to_string(i),
+                          std::string(kDevicePresenceMaxServiceKind, 'k'), 65535, models));
+    }
+    std::vector<PresenceEntry> many;
+    for (int i = 0; i < 100; ++i) many.push_back({std::string(100, 'a') + std::to_string(i), kNow, {}, big});
+    std::size_t total = 0;
+    for (const auto& page : encode_presence_sync(many)) {
+        EXPECT_LE(page.size(), kPresenceSyncMaxPayloadBytes);
+        const auto one = decode_presence_sync(page);
+        ASSERT_TRUE(one.has_value());
+        total += one->size();
+    }
+    EXPECT_EQ(total, 100u);
+
+    const auto with = [](const nlohmann::json& value) {
+        return msgpack_of({{"entries", {{{"node_id", "dev1"}, {"seen", kNow}, {"services", value}}}}});
+    };
+    EXPECT_TRUE(decode_presence_sync(with(nlohmann::json::array())));
+    EXPECT_TRUE(decode_presence_sync(with({{{"name", "a"}, {"kind", "llm"}, {"port", 80}}})));
+    EXPECT_FALSE(decode_presence_sync(with({{{"name", "a"}, {"kind", "llm"}, {"port", 0}}})));
+    EXPECT_FALSE(decode_presence_sync(with({{{"name", "a b"}, {"kind", "llm"}, {"port", 80}}})));
+    EXPECT_FALSE(decode_presence_sync(with({{{"name", "a"}, {"kind", "llm"}, {"port", 80}, {"x", 1}}})));
+    EXPECT_FALSE(decode_presence_sync(with("llm")));
+    EXPECT_FALSE(decode_presence_sync(with({"llm"})));
+}

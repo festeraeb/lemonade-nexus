@@ -71,6 +71,18 @@ struct PeerLiveness {
 
 /// Interval of the orchestrator's monitor pass (liveness and relay checks).
 inline constexpr std::chrono::seconds kMonitorInterval{5};
+/// A peer's latency sample older than this is measured again (a handshake
+/// probe), and a peer without one is probed at most this often.
+inline constexpr std::chrono::seconds kLatencyRefresh{60};
+
+/// Whether a peer's latency needs a new handshake probe now. `sample_age`
+/// is the age of its sample in seconds (negative: no sample yet), and
+/// `since_probe` the time since this device last probed it for latency
+/// (nullopt: never). No sample and never probed: probe at once. Otherwise
+/// probe when the sample is kLatencyRefresh old and the last probe was at
+/// least that long ago.
+[[nodiscard]] bool latency_probe_due(int64_t sample_age,
+                                     std::optional<std::chrono::steady_clock::duration> since_probe);
 
 /// A run-loop gap longer than this, beyond the pass's own work and planned
 /// sleep, means the process was suspended (two monitor intervals).
@@ -109,7 +121,7 @@ inline constexpr std::chrono::seconds kTunnelAliveWindow{20};
 /// before its first heartbeat.
 /// The server_path an application reads: the mux's path ("direct", "wss",
 /// "none") when the WSS rung is configured, else the UDP tunnel's state
-/// ("direct" while alive, "none" when not); empty while the mesh is off.
+/// ("direct" while alive, "none" when not); "none" while the mesh is off.
 [[nodiscard]] std::string reported_server_path(const std::string& mux_path, bool running,
                                                bool tunnel_up);
 
@@ -378,6 +390,8 @@ private:
     mutable std::mutex       mutex_;
     std::condition_variable  cv_;          // for waking the loop early
     std::vector<MeshPeer>    known_peers_;
+    /// Mesh key -> when this device last probed the peer for latency.
+    std::map<std::string, std::chrono::steady_clock::time_point> latency_probe_at_;
     std::map<std::string, uint32_t> stale_passes_;  // mesh key -> PeerLiveness::stale_passes
     MeshTunnelStatus         last_status_;
     /// The peer state the last callback reported (see set_callback).

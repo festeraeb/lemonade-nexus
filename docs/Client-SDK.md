@@ -405,6 +405,15 @@ public endpoints. They connect over the LAN instead:
   BoringTun session runs over the address that answers. The relay fallback
   waits 1.5 seconds (`kLanAnswerWindow`) for a LAN answer before it pairs a
   relay, also after a renewal. A peer on another network does not wait.
+- `MeshPeer::latency_ms` is the round trip of this device's own Noise
+  handshake with the peer (-1 until measured), and `latency_at` is the Unix
+  time of the sample (`latency_age_sec` in the sidecar status, -1 when there
+  is none). The orchestrator probes a peer it reaches directly at once and
+  again when the sample is a minute old (`kLatencyRefresh`).
+- `set_announced_services()` makes every heartbeat carry the device's
+  service list (`ServiceAnnouncement`: name, kind, port, models). Peers read
+  it as `MeshPeer::services`. The sidecar sets it from the config key
+  `services`.
 - `MeshPeer::path` (`path` in `ln_mesh_peers` and `ln_mesh_status`, and in
   the mesh port device status) says where the traffic goes: `"lan"`,
   `"direct"`, `"relay"`, or `""` (no working path yet).
@@ -412,7 +421,8 @@ public endpoints. They connect over the LAN instead:
   server runs when that server serves the transport bridge (its join answer
   carries `mesh_wss_path`): `"direct"` (UDP), `"wss"` (a TLS WebSocket to the
   server's public HTTPS listener, for networks that block UDP), or `"none"`
-  while neither is proved. It is empty when the server has no bridge. The
+  while neither is proved or the mesh is off. It is never empty. Without a
+  bridge the UDP tunnel decides between `"direct"` and `"none"`. The
   SDK races the two at start (UDP first; the WebSocket after 250 ms; the path
   of the first completed Noise handshake wins, so a captive portal that
   accepts TCP never wins), probes the tunnel every 100 ms, moves to the other

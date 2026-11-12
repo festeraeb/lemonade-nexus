@@ -294,6 +294,12 @@ private:
         /// See PeerPathInfo::rx_session and PeerPathInfo::handshakes.
         std::atomic<uint32_t> rx_session{0};
         std::atomic<uint64_t> handshakes{0};
+        /// Steady-clock ns when the newest handshake initiation left for this
+        /// peer (0 = none outstanding), and the round trip it measured.
+        /// See note_initiation and BoringtunPeer::rtt_ms.
+        std::atomic<int64_t>  init_sent_ns{0};
+        std::atomic<int64_t>  rtt_us{-1};
+        std::atomic<uint64_t> rtt_at{0};
         /// See repoint_endpoint(pin) and PeerPathInfo::last_rx_from.
         std::atomic<bool>     pinned{false};
         std::atomic<uint64_t> last_from{0};
@@ -324,6 +330,10 @@ private:
     /// Encrypt `ip_pkt` for `dst` and send it to its current endpoint.
     bool encrypt_and_send(const PeerPtr& dst, std::span<const uint8_t> ip_pkt,
                           std::vector<uint8_t>& scratch);
+
+    /// Stamp the send time when `pkt` is a handshake initiation, so the
+    /// matching response gives the round trip.
+    static void note_initiation(Peer& peer, std::span<const uint8_t> pkt);
 
     /// Record an authenticated packet from `from_packed`: the peer roams
     /// there unless it is pinned.

@@ -2,6 +2,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include <cstddef>
 #include <cstdint>
 #include <map>
 #include <string>
@@ -417,6 +418,28 @@ struct TunnelStatus {
 // Mesh P2P networking
 // ---------------------------------------------------------------------------
 
+/// Bounds of an announced service list; the server enforces the same ones
+/// (kDevicePresenceMaxServices and neighbours) and refuses the heartbeat that
+/// carries a list beyond them.
+inline constexpr std::size_t kMaxAnnouncedServices     = 8;
+inline constexpr std::size_t kMaxServiceNameLen        = 32;
+inline constexpr std::size_t kMaxServiceKindLen        = 16;
+inline constexpr std::size_t kMaxServiceModels         = 8;
+inline constexpr std::size_t kMaxServiceModelNameLen   = 64;
+
+/// One service a device offers: informational, grants no access.
+struct ServiceAnnouncement {
+    std::string              name;    ///< 1-32 of [A-Za-z0-9._-], for example "ollama"
+    std::string              kind;    ///< 1-16 of [A-Za-z0-9._-], for example "llm" or "http"
+    uint16_t                 port{0}; ///< 1-65535
+    std::vector<std::string> models;  ///< at most 8 names, 1-64 of [A-Za-z0-9._:/@+-]
+
+    bool operator==(const ServiceAnnouncement&) const = default;
+};
+
+/// True when `services` is within the bounds above with distinct names.
+[[nodiscard]] bool services_announceable(const std::vector<ServiceAnnouncement>& services);
+
 /// A single mesh peer for P2P connections.
 struct MeshPeer {
     std::string node_id;
@@ -452,6 +475,12 @@ struct MeshPeer {
     uint64_t    rx_bytes{0};
     uint64_t    tx_bytes{0};
     int32_t     latency_ms{-1};         ///< -1 = unknown
+    /// Unix timestamp of the latency_ms sample (0 = no sample yet). The
+    /// sample is the round trip of this device's handshake with the peer.
+    int64_t     latency_at{0};
+    /// The services the peer announced (empty when none, or when the server
+    /// is older than the field).
+    std::vector<ServiceAnnouncement> services;
     uint16_t    keepalive{5};           ///< Persistent keepalive (seconds)
     uint64_t    last_seen{0};           ///< Server-reported last heartbeat (Unix epoch)
     /// The peer's management key ("ed25519:..."), when the server lists it.
@@ -462,6 +491,13 @@ struct MeshPeer {
     /// them which route families the peer may call. Empty grants nothing.
     std::vector<std::string> permissions;
 };
+
+/// Age in seconds of a peer's latency sample at `now_unix`; -1 when there is
+/// no sample (or its time lies in the future).
+[[nodiscard]] inline int64_t latency_age_sec(const MeshPeer& peer, int64_t now_unix) {
+    if (peer.latency_at <= 0 || peer.latency_at > now_unix) return -1;
+    return now_unix - peer.latency_at;
+}
 
 /// Status of the entire mesh tunnel.
 struct MeshTunnelStatus {
@@ -490,8 +526,8 @@ struct MeshTunnelStatus {
     /// callback.
     bool        tunnel_up{false};
     /// The path to the session server: "direct" (UDP), "wss" (the TLS
-    /// WebSocket fallback), "none" while neither is proved. Empty when the
-    /// WSS path is not configured (BoringtunConfig::wss_url).
+    /// WebSocket fallback), "none" while neither is proved or the mesh is
+    /// off. Never empty in MeshTunnelStatus from LemonadeNexusClient.
     std::string server_path;
 };
 
@@ -614,6 +650,8 @@ void from_json(const nlohmann::json& j, AttestationManifests& a);
 
 void to_json(nlohmann::json& j, const MeshPeer& p);
 void from_json(const nlohmann::json& j, MeshPeer& p);
+void to_json(nlohmann::json& j, const ServiceAnnouncement& s);
+void from_json(const nlohmann::json& j, ServiceAnnouncement& s);
 void to_json(nlohmann::json& j, const MeshTunnelStatus& s);
 void from_json(const nlohmann::json& j, MeshTunnelStatus& s);
 void to_json(nlohmann::json& j, const MeshConfig& c);

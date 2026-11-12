@@ -414,8 +414,10 @@ bool UserspaceDataplane::add_peer(const std::string& pubkey_b64,
         std::vector<uint8_t> buf(wire::kMaxOverhead + 64);
         auto r = wireguard_force_handshake(peer->tunn, buf.data(),
                                            static_cast<uint32_t>(buf.size()));
-        if (r.op == WRITE_TO_NETWORK && r.size > 0)
+        if (r.op == WRITE_TO_NETWORK && r.size > 0) {
+            note_initiation(*peer, {buf.data(), r.size});
             send_udp(buf.data(), r.size, packed_endpoint);
+        }
     }
 
     spdlog::debug("[dataplane] added peer {} (allowed: {}, endpoint: {})",
@@ -500,8 +502,10 @@ bool UserspaceDataplane::add_identity_session(const std::string& pubkey_b64,
         std::vector<uint8_t> buf(wire::kMaxOverhead + 64);
         auto r = wireguard_force_handshake(peer->tunn, buf.data(),
                                            static_cast<uint32_t>(buf.size()));
-        if (r.op == WRITE_TO_NETWORK && r.size > 0)
+        if (r.op == WRITE_TO_NETWORK && r.size > 0) {
+            note_initiation(*peer, {buf.data(), r.size});
             send_udp(buf.data(), r.size, packed_endpoint);
+        }
     }
 
     spdlog::debug("[dataplane] added identity session {} (conn_id={}, endpoint={})",
@@ -562,8 +566,10 @@ bool UserspaceDataplane::update_endpoint(const std::string& pubkey_b64,
         std::vector<uint8_t> buf(wire::kMaxOverhead + 64);
         auto r = wireguard_force_handshake(peer->tunn, buf.data(),
                                            static_cast<uint32_t>(buf.size()));
-        if (r.op == WRITE_TO_NETWORK && r.size > 0)
+        if (r.op == WRITE_TO_NETWORK && r.size > 0) {
+            note_initiation(*peer, {buf.data(), r.size});
             send_udp(buf.data(), r.size, *parsed);
+        }
     }
     return true;
 }
@@ -636,6 +642,7 @@ std::size_t UserspaceDataplane::probe_endpoints(const std::string& pubkey_b64,
     auto r = wireguard_force_handshake(peer->tunn, buf.data(),
                                        static_cast<uint32_t>(buf.size()));
     if (r.op != WRITE_TO_NETWORK || r.size == 0) return 0;
+    note_initiation(*peer, {buf.data(), r.size});
     for (const auto target : targets) send_udp(buf.data(), r.size, target);
     return targets.size();
 }
@@ -663,6 +670,11 @@ std::vector<BoringtunPeer> UserspaceDataplane::snapshot_peers() const {
         if (st.time_since_last_handshake >= 0)
             snapshot.last_handshake = now - static_cast<uint64_t>(st.time_since_last_handshake);
         snapshot.last_rx = peer->last_rx.load(std::memory_order_relaxed);
+        snapshot.rtt_at  = peer->rtt_at.load(std::memory_order_relaxed);
+        if (snapshot.rtt_at != 0) {
+            const auto us = peer->rtt_us.load(std::memory_order_relaxed);
+            snapshot.rtt_ms = us < 0 ? -1 : static_cast<int32_t>((us + 500) / 1000);
+        }
         snapshot.rx_bytes = st.rx_bytes;
         snapshot.tx_bytes = st.tx_bytes;
         out.push_back(std::move(snapshot));
@@ -724,6 +736,7 @@ bool UserspaceDataplane::encrypt_and_send(const PeerPtr& dst,
 
     uint64_t endpoint = dst->endpoint.load(std::memory_order_relaxed);
     if (!endpoint) return false;
+    note_initiation(*dst, {scratch.data(), r.size});
     send_udp(scratch.data(), r.size, endpoint);
     return true;
 }
@@ -845,6 +858,15 @@ void UserspaceDataplane::handle_datagram(std::span<const uint8_t> pkt,
             if (*type == wire::MsgType::HandshakeInit || *type == wire::MsgType::HandshakeResponse) {
                 peer->handshakes.fetch_add(1, std::memory_order_relaxed);
             }
+            if (*type == wire::MsgType::HandshakeResponse) {
+                const auto sent = peer->init_sent_ns.exchange(0, std::memory_order_relaxed);
+                if (sent != 0) {
+                    const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                                         std::chrono::steady_clock::now().time_since_epoch()).count();
+                    peer->rtt_us.store(std::max<int64_t>(0, (now - sent) / 1000), std::memory_order_relaxed);
+                    peer->rtt_at.store(static_cast<uint64_t>(std::time(nullptr)), std::memory_order_relaxed);
+                }
+            }
             drain_followups(peer, from_packed, scratch_a, scratch_b);
             break;
 
@@ -877,6 +899,13 @@ void UserspaceDataplane::handle_datagram(std::span<const uint8_t> pkt,
         default:
             break;
     }
+}
+
+void UserspaceDataplane::note_initiation(Peer& peer, std::span<const uint8_t> pkt) {
+    if (wire::parse_type(pkt) != wire::MsgType::HandshakeInit) return;
+    const auto now = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                         std::chrono::steady_clock::now().time_since_epoch()).count();
+    peer.init_sent_ns.store(now, std::memory_order_relaxed);
 }
 
 void UserspaceDataplane::drain_followups(const PeerPtr& peer, uint64_t to_packed,
@@ -1012,7 +1041,10 @@ void UserspaceDataplane::timer_loop() {
                                     static_cast<uint32_t>(buf.size()));
             if (r.op == WRITE_TO_NETWORK && r.size > 0) {
                 uint64_t endpoint = peer->endpoint.load(std::memory_order_relaxed);
-                if (endpoint) send_udp(buf.data(), r.size, endpoint);
+                if (endpoint) {
+                    note_initiation(*peer, {buf.data(), r.size});
+                    send_udp(buf.data(), r.size, endpoint);
+                }
             }
         }
         slot = (slot + 1) % kTimerSlots;

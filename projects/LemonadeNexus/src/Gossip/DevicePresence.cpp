@@ -18,6 +18,24 @@ bool lan_listed_at(uint64_t lan_at, uint64_t now) {
     return lan_at > 0 && lan_at + kDevicePresenceLanTtlSec > now;
 }
 
+bool services_listed_at(uint64_t services_at, uint64_t now) {
+    return services_at > 0 && services_at + kDevicePresenceServicesTtlSec > now;
+}
+
+bool token_char(char c, bool allow_colon_slash) {
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+        c == '_' || c == '-' || c == '.') {
+        return true;
+    }
+    return allow_colon_slash && (c == ':' || c == '/' || c == '@' || c == '+');
+}
+
+bool token_valid(std::string_view text, std::size_t max_len, bool allow_colon_slash) {
+    return !text.empty() && text.size() <= max_len &&
+           std::all_of(text.begin(), text.end(),
+                       [&](char c) { return token_char(c, allow_colon_slash); });
+}
+
 // msgpack bytes of the outer map with an array header for up to
 // kPresenceSyncMaxEntries entries: fixmap, the "entries" key, array16.
 constexpr std::size_t kPayloadOverheadBytes = 1 + 8 + 3;
@@ -57,6 +75,70 @@ json wire_lan(const PresenceEntry& entry) {
 }
 
 }  // namespace
+
+bool presence_service_valid(const ServiceAnnouncement& service) {
+    if (!token_valid(service.name, kDevicePresenceMaxServiceName, false) ||
+        !token_valid(service.kind, kDevicePresenceMaxServiceKind, false) || service.port == 0 ||
+        service.models.size() > kDevicePresenceMaxServiceModels) {
+        return false;
+    }
+    return std::all_of(service.models.begin(), service.models.end(), [](const std::string& m) {
+        return token_valid(m, kDevicePresenceMaxServiceModelLen, true);
+    });
+}
+
+bool presence_services_valid(const std::vector<ServiceAnnouncement>& services) {
+    if (services.size() > kDevicePresenceMaxServices) return false;
+    for (std::size_t i = 0; i < services.size(); ++i) {
+        if (!presence_service_valid(services[i])) return false;
+        for (std::size_t j = 0; j < i; ++j) {
+            if (services[j].name == services[i].name) return false;
+        }
+    }
+    return true;
+}
+
+std::optional<std::vector<ServiceAnnouncement>> parse_presence_services(const json& value) {
+    if (!value.is_array() || value.size() > kDevicePresenceMaxServices) return std::nullopt;
+    std::vector<ServiceAnnouncement> out;
+    for (const auto& item : value) {
+        if (!item.is_object()) return std::nullopt;
+        ServiceAnnouncement service;
+        for (const auto& [key, field] : item.items()) {
+            if (key == "name" && field.is_string()) {
+                service.name = field.get<std::string>();
+            } else if (key == "kind" && field.is_string()) {
+                service.kind = field.get<std::string>();
+            } else if (key == "port" && field.is_number_unsigned()) {
+                const auto port = field.get<uint64_t>();
+                if (port == 0 || port > 65535) return std::nullopt;
+                service.port = static_cast<uint16_t>(port);
+            } else if (key == "models" && field.is_array() &&
+                       field.size() <= kDevicePresenceMaxServiceModels) {
+                for (const auto& model : field) {
+                    if (!model.is_string()) return std::nullopt;
+                    service.models.push_back(model.get<std::string>());
+                }
+            } else {
+                return std::nullopt;
+            }
+        }
+        out.push_back(std::move(service));
+    }
+    if (!presence_services_valid(out)) return std::nullopt;
+    return out;
+}
+
+json presence_services_json(const std::vector<ServiceAnnouncement>& services) {
+    json out = json::array();
+    for (const auto& service : services) {
+        out.push_back({{"name", service.name},
+                       {"kind", service.kind},
+                       {"port", service.port},
+                       {"models", service.models}});
+    }
+    return out;
+}
 
 bool presence_node_id_valid(std::string_view node_id) {
     if (node_id.empty() || node_id.size() > kDevicePresenceMaxNodeIdBytes) return false;
@@ -114,6 +196,11 @@ std::vector<std::vector<uint8_t>> encode_presence_sync(const std::vector<Presenc
             }
             item["lan"] = std::move(lan);
         }
+        if (presence_services_valid(e.services) && !e.services.empty()) {
+            auto services = presence_services_json(e.services);
+            bytes += json::to_msgpack(json{{"services", services}}).size();
+            item["services"] = std::move(services);
+        }
         if (page.size() >= kPresenceSyncMaxEntries ||
             page_bytes + bytes > kPresenceSyncMaxPayloadBytes) {
             flush();
@@ -164,6 +251,12 @@ std::optional<std::vector<PresenceEntry>> decode_presence_sync(std::span<const u
                 entry.lan.push_back(text);
             }
         }
+        // The device's own announcement, relayed: the same bounds again.
+        if (const auto services = e.find("services"); services != e.end()) {
+            auto parsed = parse_presence_services(*services);
+            if (!parsed) return std::nullopt;
+            entry.services = std::move(*parsed);
+        }
         out.push_back(std::move(entry));
     }
     return out;
@@ -181,8 +274,9 @@ DevicePresence::Entry* DevicePresence::find_or_add_locked(const std::string& nod
     return &entries_[node_id];
 }
 
-DevicePresence::LocalResult DevicePresence::record_local(const std::string& node_id, uint64_t now,
-                                                         std::optional<std::vector<std::string>> lan) {
+DevicePresence::LocalResult DevicePresence::record_local(
+    const std::string& node_id, uint64_t now, std::optional<std::vector<std::string>> lan,
+    std::optional<std::vector<ServiceAnnouncement>> services) {
     LocalResult result;
     if (now == 0 || !presence_node_id_valid(node_id)) return result;
     {
@@ -201,8 +295,15 @@ DevicePresence::LocalResult DevicePresence::record_local(const std::string& node
             entry->lan = std::move(*lan);
             entry->lan_at = entry->lan.empty() ? 0 : now;
         }
+        if (services) {
+            const bool listed = services_listed_at(entry->services_at, now);
+            result.services_changed =
+                services->empty() ? listed : (!listed || entry->services != *services);
+            entry->services = std::move(*services);
+            entry->services_at = entry->services.empty() ? 0 : now;
+        }
     }
-    if (result.became_online || result.lan_changed) notify_changed();
+    if (result.became_online || result.lan_changed || result.services_changed) notify_changed();
     return result;
 }
 
@@ -231,9 +332,16 @@ DevicePresence::MergeResult DevicePresence::merge_remote(const std::vector<Prese
             if (listed != was_listed || (listed && entry->lan != e.lan)) result.lan_changed = true;
             entry->lan = e.lan;
             entry->lan_at = e.lan.empty() ? 0 : seen;
+            const bool services_were = services_listed_at(entry->services_at, now);
+            const bool services_now = !e.services.empty() && services_listed_at(seen, now);
+            if (services_now != services_were || (services_now && entry->services != e.services)) {
+                result.services_changed = true;
+            }
+            entry->services = e.services;
+            entry->services_at = e.services.empty() ? 0 : seen;
         }
     }
-    if (result.became_online || result.lan_changed) notify_changed();
+    if (result.became_online || result.lan_changed || result.services_changed) notify_changed();
     return result;
 }
 
@@ -252,6 +360,14 @@ std::vector<std::string> DevicePresence::lan_endpoints(const std::string& node_i
     return it->second.lan;
 }
 
+std::vector<ServiceAnnouncement> DevicePresence::services(const std::string& node_id,
+                                                          uint64_t now) const {
+    std::lock_guard lock(mtx_);
+    const auto it = entries_.find(node_id);
+    if (it == entries_.end() || !services_listed_at(it->second.services_at, now)) return {};
+    return it->second.services;
+}
+
 std::vector<PresenceEntry> DevicePresence::local_online(uint64_t now) const {
     std::vector<PresenceEntry> out;
     {
@@ -259,7 +375,10 @@ std::vector<PresenceEntry> DevicePresence::local_online(uint64_t now) const {
         for (const auto& [id, entry] : entries_) {
             if (!online_at(entry.local_seen, now)) continue;
             out.push_back({id, entry.local_seen,
-                           lan_listed_at(entry.lan_at, now) ? entry.lan : std::vector<std::string>{}});
+                           lan_listed_at(entry.lan_at, now) ? entry.lan : std::vector<std::string>{},
+                           services_listed_at(entry.services_at, now)
+                               ? entry.services
+                               : std::vector<ServiceAnnouncement>{}});
         }
     }
     std::sort(out.begin(), out.end(),
@@ -282,6 +401,10 @@ DevicePresence::Sweep DevicePresence::sweep(uint64_t now) {
         if (entry.lan_at > 0 && !lan_listed_at(entry.lan_at, now)) {
             entry.lan.clear();
             entry.lan_at = 0;
+        }
+        if (entry.services_at > 0 && !services_listed_at(entry.services_at, now)) {
+            entry.services.clear();
+            entry.services_at = 0;
         }
         if (now >= entry.seen && now - entry.seen >= kDevicePresenceRetentionSec) {
             it = entries_.erase(it);

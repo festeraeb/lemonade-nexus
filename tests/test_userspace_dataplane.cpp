@@ -176,6 +176,54 @@ TEST_F(UserspaceDataplaneTest, TwoNodesHandshakeAndExchangePackets) {
     server.dataplane.stop();
 }
 
+// The initiator measures the round trip of its own handshake: a peer reports
+// a sample as soon as the handshake completes, with the time it was taken.
+// The responder never sent an initiation, so it has no sample.
+TEST_F(UserspaceDataplaneTest, HandshakeGivesTheInitiatorAnRttSample) {
+    Node server, client;
+    ASSERT_TRUE(server.start());
+    ASSERT_TRUE(client.start());
+    server.dataplane.add_local_ip(ip(10, 64, 0, 1));
+    client.dataplane.add_local_ip(ip(10, 64, 0, 2));
+    ASSERT_TRUE(server.dataplane.add_peer(client.keys.pub_b64, "10.64.0.2/32", ""));
+
+    // Before any handshake there is no sample.
+    ASSERT_TRUE(client.dataplane.add_peer(server.keys.pub_b64, "10.64.0.0/10", ""));
+    {
+        const auto peers = client.dataplane.snapshot_peers();
+        ASSERT_EQ(peers.size(), 1u);
+        EXPECT_EQ(peers[0].rtt_ms, -1);
+        EXPECT_EQ(peers[0].rtt_at, 0u);
+    }
+
+    // The probe sends the initiation at once; no traffic is needed.
+    ASSERT_EQ(client.dataplane.probe_endpoints(server.keys.pub_b64, {server.loopback_endpoint()}), 1u);
+    const auto deadline = std::chrono::steady_clock::now() + 5s;
+    int32_t rtt = -1;
+    uint64_t at = 0;
+    while (std::chrono::steady_clock::now() < deadline) {
+        const auto peers = client.dataplane.snapshot_peers();
+        if (!peers.empty() && peers[0].rtt_at != 0) {
+            rtt = peers[0].rtt_ms;
+            at = peers[0].rtt_at;
+            break;
+        }
+        std::this_thread::sleep_for(20ms);
+    }
+    EXPECT_GE(rtt, 0);
+    EXPECT_LT(rtt, 1000);  // loopback
+    EXPECT_GT(at, 0u);
+    EXPECT_LE(at, static_cast<uint64_t>(std::time(nullptr)));
+
+    const auto responder = server.dataplane.snapshot_peers();
+    ASSERT_EQ(responder.size(), 1u);
+    EXPECT_EQ(responder[0].rtt_ms, -1);
+    EXPECT_EQ(responder[0].rtt_at, 0u);
+
+    client.dataplane.stop();
+    server.dataplane.stop();
+}
+
 // A suspended app's socket is defunct when the app returns (iOS, Android).
 // suspend() gives the socket up before that, rebind() opens a new one, and
 // the peers, routes, and sessions survive: the server learns the client's

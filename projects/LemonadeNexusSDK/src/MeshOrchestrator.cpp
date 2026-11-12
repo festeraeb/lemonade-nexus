@@ -85,8 +85,14 @@ bool loop_was_suspended(std::chrono::milliseconds wall_elapsed, std::chrono::mil
 
 std::string reported_server_path(const std::string& mux_path, bool running, bool tunnel_up) {
     if (!mux_path.empty()) return mux_path;
-    if (!running) return {};
+    if (!running) return "none";
     return tunnel_up ? "direct" : "none";
+}
+
+bool latency_probe_due(int64_t sample_age,
+                       std::optional<std::chrono::steady_clock::duration> since_probe) {
+    if (sample_age >= 0 && sample_age < kLatencyRefresh.count()) return false;
+    return !since_probe || *since_probe >= kLatencyRefresh;
 }
 
 bool heartbeat_means_node_gone(int http_status, const std::string& error) {
@@ -183,6 +189,7 @@ void MeshOrchestrator::stop() {
         stale_passes_.clear();
         last_status_ = {};
         reported_peers_.clear();
+        latency_probe_at_.clear();
         devices_revision_.clear();
         our_endpoint_.clear();
         our_local_endpoints_.clear();
@@ -502,6 +509,8 @@ std::vector<std::string> MeshOrchestrator::do_peer_refresh() {
                 }
                 peer.last_handshake = std::max(peer.last_handshake, old.last_handshake);
                 peer.last_rx        = std::max(peer.last_rx, old.last_rx);
+                peer.latency_ms     = old.latency_ms;
+                peer.latency_at     = old.latency_at;
                 peer.is_online      = old.is_online;
                 peer.path           = old.path;
                 // The server does not know the relay path; the next monitor
@@ -841,6 +850,7 @@ void MeshOrchestrator::do_monitor(bool count_stale) {
             std::chrono::system_clock::now().time_since_epoch()).count());
 
     std::vector<std::string> lan_lost;
+    std::vector<std::pair<std::string, std::string>> latency_probes;
     {
         std::lock_guard lock(mutex_);
         std::map<std::string, uint32_t> stale_passes;
@@ -858,6 +868,10 @@ void MeshOrchestrator::do_monitor(bool count_stale) {
                         peer.last_handshake = tp.last_handshake;
                     }
                     if (tp.last_rx > peer.last_rx) peer.last_rx = tp.last_rx;
+                    if (tp.latency_at > peer.latency_at) {
+                        peer.latency_ms = tp.latency_ms;
+                        peer.latency_at = tp.latency_at;
+                    }
                     // A relayed peer reports the relay it goes through. A
                     // peer the dataplane now reaches at another address left
                     // its relay; a listed relay node keeps its endpoint.
@@ -906,6 +920,10 @@ void MeshOrchestrator::do_monitor(bool count_stale) {
                 tp.is_online = peer.is_online;
                 tp.server_online = peer.server_online;
                 tp.path      = peer.path;
+                if (peer.latency_at > tp.latency_at) {
+                    tp.latency_ms = peer.latency_ms;
+                    tp.latency_at = peer.latency_at;
+                }
                 tp.local_endpoints = peer.local_endpoints;
                 break;
             }
@@ -917,7 +935,32 @@ void MeshOrchestrator::do_monitor(bool count_stale) {
             if (p.is_online) ++ms.online_count;
         }
         ms.peer_count = static_cast<uint32_t>(known_peers_.size());
+
+        // A peer this device reaches directly gets a handshake probe at once,
+        // and again when its sample is older than kLatencyRefresh: the
+        // handshake round trip is the latency sample, and a peer that only
+        // ever answered has none.
+        const auto now_steady = std::chrono::steady_clock::now();
+        for (const auto& peer : known_peers_) {
+            if (peer.mesh_pubkey.empty() || !peer.is_online || peer.path.empty() ||
+                peer.path == "relay") {
+                continue;
+            }
+            const auto age = peer.latency_at > 0 ? now_epoch - peer.latency_at : int64_t{-1};
+            const auto last = latency_probe_at_.find(peer.mesh_pubkey);
+            std::optional<std::chrono::steady_clock::duration> since;
+            if (last != latency_probe_at_.end()) since = now_steady - last->second;
+            if (!latency_probe_due(age, since)) continue;
+            for (const auto& tp : ms.peers) {
+                if (tp.mesh_pubkey == peer.mesh_pubkey && !tp.endpoint.empty()) {
+                    latency_probes.emplace_back(peer.mesh_pubkey, tp.endpoint);
+                    latency_probe_at_[peer.mesh_pubkey] = now_steady;
+                    break;
+                }
+            }
+        }
     }
+    for (const auto& [pubkey, endpoint] : latency_probes) (void)mesh_.probe_peer(pubkey, endpoint);
 
     // The LAN path went silent: the peer is probed again at once, at every
     // target, and gets a relay when nothing answers within the LAN window.

@@ -672,6 +672,14 @@ public:
     /// which changes with the device list of the node's groups. Either is
     /// empty when the server sends none (older servers) or a malformed one.
     /// Compare them only for equality; they carry no data.
+    /// Announce the services this device offers. Every later mesh heartbeat
+    /// carries the list (an empty list removes what the server holds); until
+    /// this is called, heartbeats carry none and the server keeps what it
+    /// has. The server lists the services in the peer entries of the devices
+    /// that list this node (MeshPeer::services). Returns false and changes
+    /// nothing when the list is beyond the bounds of services_announceable.
+    [[nodiscard]] bool set_announced_services(const std::vector<ServiceAnnouncement>& services);
+
     [[nodiscard]] Result<MeshRevisions> mesh_heartbeat(
         const std::string& node_id, const std::string& endpoint,
         const std::optional<std::vector<std::string>>& local_endpoints = std::nullopt);

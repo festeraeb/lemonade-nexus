@@ -392,6 +392,10 @@ struct LemonadeNexusClient::Impl {
     // join again.
     std::atomic<bool> rejoin_needed{false};
 
+    // The services this device announces with each heartbeat; unset sends none.
+    std::mutex                                       services_mtx;
+    std::optional<std::vector<ServiceAnnouncement>> announced_services;
+
     // The owning client: a session move calls its join and mesh methods.
     LemonadeNexusClient* owner{nullptr};
 
@@ -3898,8 +3902,9 @@ MeshTunnelStatus LemonadeNexusClient::mesh_status() const {
     // A node the server no longer knows carries nothing useful over the tunnel.
     if (status.needs_rejoin) {
         status.tunnel_up = false;
-        if (!status.server_path.empty()) status.server_path = "none";
+        status.server_path = "none";
     }
+    if (status.server_path.empty()) status.server_path = "none";
     return status;
 }
 
@@ -4357,6 +4362,13 @@ void LemonadeNexusClient::begin_mesh_peer_waits() {
 
 bool LemonadeNexusClient::event_socket_supported() noexcept { return kEventSocketSupported; }
 
+bool LemonadeNexusClient::set_announced_services(const std::vector<ServiceAnnouncement>& services) {
+    if (!services_announceable(services)) return false;
+    std::lock_guard lock(impl_->services_mtx);
+    impl_->announced_services = services;
+    return true;
+}
+
 Result<LemonadeNexusClient::MeshRevisions> LemonadeNexusClient::mesh_heartbeat(
     const std::string& nid, const std::string& endpoint,
     const std::optional<std::vector<std::string>>& local_endpoints) {
@@ -4364,6 +4376,10 @@ Result<LemonadeNexusClient::MeshRevisions> LemonadeNexusClient::mesh_heartbeat(
     body["node_id"]  = nid;
     body["endpoint"] = endpoint;
     if (local_endpoints) body["local_endpoints"] = *local_endpoints;
+    {
+        std::lock_guard lock(impl_->services_mtx);
+        if (impl_->announced_services) body["services"] = *impl_->announced_services;
+    }
 
     int status = 0;
     auto resp = impl_->private_http_post("/api/mesh/heartbeat", body, status);
