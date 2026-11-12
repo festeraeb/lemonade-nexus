@@ -1,4 +1,5 @@
 #include <LemonadeNexusSDK/LemonadeNexusClient.hpp>
+#include <LemonadeNexus/Network/AddressMap.hpp>
 #include <LemonadeNexusSDK/LanPaths.hpp>
 #include <LemonadeNexusSDK/LatencyMonitor.hpp>
 #include <LemonadeNexusSDK/MeshOrchestrator.hpp>
@@ -349,7 +350,9 @@ struct LemonadeNexusClient::Impl {
     struct PooledClient {
         std::mutex      in_use;
         httplib::Client cli;
-        explicit PooledClient(const std::string& url) : cli(url) {}
+        explicit PooledClient(const std::string& url) : cli(url) {
+            if (!nexus::network::AddressMap::empty()) cli.set_hostname_addr_map(nexus::network::AddressMap::all());
+        }
     };
     std::map<std::string, std::shared_ptr<PooledClient>> public_clients;
 
@@ -1488,6 +1491,7 @@ struct LemonadeNexusClient::Impl {
             bool ok = false;
             try {
                 httplib::Client cli(base_url(ep));
+                if (!nexus::network::AddressMap::empty()) cli.set_hostname_addr_map(nexus::network::AddressMap::all());
                 cli.set_connection_timeout(config.connect_timeout_sec);
                 cli.set_read_timeout(config.read_timeout_sec);
                 apply_client_socket_options(cli);
@@ -3399,7 +3403,7 @@ Result<JoinResult> LemonadeNexusClient::join_network(const std::string& username
         bt.public_key        = mesh_pubkey;
         bt.tunnel_ip         = tunnel_ip;
         bt.server_public_key = resp->value("mesh_server_pubkey", std::string{});
-        bt.server_endpoint   = resp->value("mesh_endpoint", std::string{});
+        bt.server_endpoint   = nexus::network::AddressMap::endpoint(resp->value("mesh_endpoint", std::string{}));
         bt.allowed_ips       = {resp->value("tunnel_subnet", std::string{"10.64.0.0/10"})};
         // A server with the transport bridge names its route; the mesh then
         // keeps a TLS WebSocket path to the server for networks that block

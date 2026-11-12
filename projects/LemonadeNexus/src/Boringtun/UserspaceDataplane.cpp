@@ -2,6 +2,7 @@
 
 #include <LemonadeNexus/Boringtun/WireProtocol.hpp>
 #include <LemonadeNexus/Network/StunWire.hpp>
+#include <LemonadeNexus/Network/AddressMap.hpp>
 
 #include <boringtun_ffi.h>
 #include <sodium.h>
@@ -111,7 +112,9 @@ bool is_reply_packet(std::span<const uint8_t> ip_pkt) {
 }
 
 /// Parse "a.b.c.d:port" into a packed endpoint.
-std::optional<uint64_t> parse_endpoint(const std::string& endpoint) {
+std::optional<uint64_t> parse_endpoint(const std::string& advertised) {
+    // A client behind a forward reaches the advertised address through another one.
+    const std::string endpoint = nexus::network::AddressMap::endpoint(advertised);
     auto colon = endpoint.rfind(':');
     if (colon == std::string::npos || colon + 1 >= endpoint.size()) return std::nullopt;
     auto host = Cidr::parse(endpoint.substr(0, colon));

@@ -1,4 +1,5 @@
 #include <LemonadeNexusSDK/RelayChannel.hpp>
+#include <LemonadeNexus/Network/AddressMap.hpp>
 
 #include <LemonadeNexus/Relay/RelayWire.hpp>
 #include <LemonadeNexus/Security/CanonicalEncoding.hpp>
@@ -377,8 +378,9 @@ std::optional<std::size_t> select_relay_for_pair(const std::vector<std::string>&
     return best;
 }
 
-std::optional<std::string> resolve_relay_ipv4(const std::string& host) {
-    if (host.empty()) return std::nullopt;
+std::optional<std::string> resolve_relay_ipv4(const std::string& advertised) {
+    if (advertised.empty()) return std::nullopt;
+    const std::string host = nexus::network::AddressMap::host(advertised);
     ensure_sockets();
     in_addr literal{};
     if (inet_pton(AF_INET, host.c_str(), &literal) == 1) return host;

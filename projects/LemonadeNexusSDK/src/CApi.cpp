@@ -7,6 +7,7 @@
 #include <LemonadeNexusSDK/IdentityStore.hpp>
 #include <LemonadeNexusSDK/MeshPort.hpp>
 #include <LemonadeNexus/Auth/AccountDeletionProof.hpp>
+#include <LemonadeNexus/Network/AddressMap.hpp>
 
 #include <nlohmann/json.hpp>
 #include <spdlog/sinks/base_sink.h>
@@ -239,6 +240,23 @@ ln_error_t ln_set_ca_bundle_path(const char* path) {
     if (!path) return LN_ERR_NULL_ARG;
     try {
         lnsdk::set_ca_bundle_path(path);
+        return LN_OK;
+    } catch (...) {
+        return LN_ERR_INTERNAL;
+    }
+}
+
+ln_error_t ln_set_address_map(const char* map_json) {
+    if (!map_json) return LN_ERR_NULL_ARG;
+    try {
+        auto j = nlohmann::json::parse(map_json, nullptr, false);
+        if (j.is_discarded() || !j.is_object()) return LN_ERR_REJECTED;
+        std::map<std::string, std::string> m;
+        for (auto it = j.begin(); it != j.end(); ++it) {
+            if (!it.value().is_string() || it.key().empty() || it.value().get<std::string>().empty()) return LN_ERR_REJECTED;
+            m[it.key()] = it.value().get<std::string>();
+        }
+        nexus::network::AddressMap::set(std::move(m));
         return LN_OK;
     } catch (...) {
         return LN_ERR_INTERNAL;

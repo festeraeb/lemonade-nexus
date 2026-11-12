@@ -1,5 +1,6 @@
 #include <LemonadeNexusSDK/LatencyMonitor.hpp>
 #include <LemonadeNexusSDK/LemonadeNexusClient.hpp>
+#include <LemonadeNexus/Network/AddressMap.hpp>
 
 #include <httplib.h>
 #include <spdlog/spdlog.h>
@@ -53,6 +54,7 @@ struct LatencyMonitor::Impl {
         std::string url = "https://" + ep.host + ":" + std::to_string(ep.port);
 
         httplib::Client cli(url);
+        if (!nexus::network::AddressMap::empty()) cli.set_hostname_addr_map(nexus::network::AddressMap::all());
         cli.set_connection_timeout(0, config.probe_timeout_ms * 1000);  // microseconds
         cli.set_read_timeout(0, config.probe_timeout_ms * 1000);
         if (const auto bundle = ca_bundle_path(); !bundle.empty()) {

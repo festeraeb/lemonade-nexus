@@ -108,6 +108,15 @@ ln_error_t ln_set_log_callback(ln_log_fn callback, void* user);
  *  clients exist. Returns LN_OK, LN_ERR_NULL_ARG for a NULL `path`. */
 ln_error_t ln_set_ca_bundle_path(const char* path);
 
+/** A device that reaches the servers through a forward (a phone that reaches LAN-only servers over
+ *  Tailscale): `map_json` is a JSON object from an advertised host name or IPv4 address to an address
+ *  this device can reach, for example {"w1.example.lan": "100.64.0.7", "192.168.1.10": "100.64.0.7"}.
+ *  The SDK then dials the mapped address for HTTPS (the certificate is still verified against the
+ *  name), for the server's dataplane endpoint, relays and peer endpoints. Process-wide; "{}" clears
+ *  it. Set it before the first ln_create_tls. Returns LN_OK, LN_ERR_NULL_ARG, or LN_ERR_REJECTED for
+ *  anything but an object of non-empty strings. */
+ln_error_t ln_set_address_map(const char* map_json);
+
 /** Create a client connecting to host:port (plaintext HTTP). */
 ln_client_t* ln_create(const char* host, uint16_t port);
 
