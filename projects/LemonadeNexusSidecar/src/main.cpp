@@ -535,7 +535,10 @@ int main(int argc, char* argv[]) {
             return;
         }
         auto named = result.value;
-        named["issued_by"] = cfg.host + ":" + std::to_string(cfg.port);  // redeem it there
+        {
+                            auto by = client.session_server();
+                            named["issued_by"] = by.empty() ? cfg.host + ":" + std::to_string(cfg.port) : by;
+                        }  // redeem it there
         res.set_content(named.dump(), "application/json");
     });
     // Bridge a peer's mesh service to a loopback port the host app can dial.
@@ -640,7 +643,10 @@ int main(int argc, char* argv[]) {
                         // An invite is honoured only by the server that minted it (seen on the
                         // CESARops work Nexus 2026-10-30 and 2026-11-12): name that server.
                         auto named = inv.value;
-                        named["issued_by"] = cfg.host + ":" + std::to_string(cfg.port);
+                        {
+                            auto by = client.session_server();
+                            named["issued_by"] = by.empty() ? cfg.host + ":" + std::to_string(cfg.port) : by;
+                        }
                         std::ofstream out(cfg.link_token_out, std::ios::trunc);
                         out << named.dump() << "\n";
                         out.close();

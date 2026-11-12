@@ -694,6 +694,10 @@ public:
     /// Returns by value to avoid data races with concurrent set_node_id().
     [[nodiscard]] std::string node_id() const;
 
+    /// "host:port" of the verified Tier 1 server that issued the current session
+    /// (the server a minted invite must be redeemed through); empty when none.
+    [[nodiscard]] std::string session_server() const;
+
     /// Set the node ID manually.
     void set_node_id(const std::string& id);
 

@@ -1716,6 +1716,14 @@ std::string LemonadeNexusClient::session_token() const {
     return impl_->token();
 }
 
+std::string LemonadeNexusClient::session_server() const {
+    std::lock_guard transport(impl_->transport_mtx);
+    for (const auto& s : impl_->tier1.membership().servers) {
+        if (s.node_id == impl_->session_node) return s.host + ":" + std::to_string(s.port);
+    }
+    return {};
+}
+
 std::string LemonadeNexusClient::node_id() const {
     std::lock_guard lock(impl_->mutex);
     return impl_->node_id;
