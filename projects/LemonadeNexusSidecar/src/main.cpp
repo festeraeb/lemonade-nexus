@@ -523,7 +523,9 @@ int main(int argc, char* argv[]) {
                             "application/json");
             return;
         }
-        res.set_content(result.value.dump(), "application/json");
+        auto named = result.value;
+        named["issued_by"] = cfg.host + ":" + std::to_string(cfg.port);  // redeem it there
+        res.set_content(named.dump(), "application/json");
     });
     // Bridge a peer's mesh service to a loopback port the host app can dial.
     control.Post("/egress", [&](const httplib::Request& req, httplib::Response& res) {
@@ -621,8 +623,12 @@ int main(int argc, char* argv[]) {
                 if (!cfg.link_token_out.empty()) {
                     auto inv = client.create_link_token(3600, "", cfg.link_token_perms);
                     if (inv.ok) {
+                        // An invite is honoured only by the server that minted it (seen on the
+                        // CESARops work Nexus 2026-10-30 and 2026-11-12): name that server.
+                        auto named = inv.value;
+                        named["issued_by"] = cfg.host + ":" + std::to_string(cfg.port);
                         std::ofstream out(cfg.link_token_out, std::ios::trunc);
-                        out << inv.value.dump() << "\n";
+                        out << named.dump() << "\n";
                         out.close();
                         std::error_code ec;
                         std::filesystem::permissions(cfg.link_token_out,
