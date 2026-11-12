@@ -57,6 +57,7 @@
 #include <LemonadeNexus/Api/TreeRouteGate.hpp>
 #include <LemonadeNexus/Api/RelayApiHandler.hpp>
 #include <LemonadeNexus/Api/CertApiHandler.hpp>
+#include <LemonadeNexus/Admission/JoinGate.hpp>
 #include <LemonadeNexus/Api/AdminApiHandler.hpp>
 #include <LemonadeNexus/Api/MeshApiHandler.hpp>
 #include <LemonadeNexus/Api/MeshRekey.hpp>
@@ -1586,6 +1587,29 @@ int main(int argc, char* argv[]) {
             },
         .rollout_proof    = rollout_proof,
     };
+
+    // Operator admission list (CESARops fork): off unless a gate URL is configured. A configured
+    // gate whose token cannot be read refuses to start rather than fall back to open joins.
+    std::unique_ptr<nexus::admission::JoinGate> join_gate;
+    if (!config.admission_gate_url.empty()) {
+        std::string token;
+        {
+            std::ifstream in(config.admission_token_file);
+            std::getline(in, token);
+            while (!token.empty() && (token.back() == '\r' || token.back() == ' ')) token.pop_back();
+        }
+        if (token.size() < 32) {
+            spdlog::error("admission_gate_url is set but admission_token_file is missing or too short");
+            return 1;
+        }
+        join_gate = std::make_unique<nexus::admission::JoinGate>(
+            config.admission_gate_url, token,
+            std::filesystem::path(config.data_root) / "security" / "admission-state.json",
+            config.server_hostname.empty() ? "server" : config.server_hostname, auth_service);
+        ctx.join_gate = join_gate.get();
+        join_gate->start();
+        spdlog::info("[admission] operator admission list on, gate {}", config.admission_gate_url);
+    }
 
     nexus::api::PublicApiHandler public_api{ctx};
     nexus::api::AuthApiHandler   auth_api{ctx};

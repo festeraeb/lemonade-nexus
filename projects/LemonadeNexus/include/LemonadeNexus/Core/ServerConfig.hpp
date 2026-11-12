@@ -93,6 +93,15 @@ struct ServerConfig {
     std::size_t transport_bridge_max_connections{32};
     std::size_t transport_bridge_max_per_ip{4};
 
+    /// Operator admission list for new devices (CESARops fork). Empty URL = open
+    /// registration as upstream. "http://host:port" of the gate service.
+    std::string admission_gate_url;
+    /// File that holds the bearer token for the gate's /v1 routes (mode 0600, not in a repo).
+    std::string admission_token_file;
+    /// File that holds the token for POST /api/admission/kick and GET /api/admission/members
+    /// on the private listener. Unset: those routes are not registered.
+    std::string admission_kick_token_file;
+
     // First-run CLI mode: initialize the data directory (identity + gossip
     // keypairs), print onboarding info (pubkeys, node ID, next steps), and exit.
     bool        first_run{false};

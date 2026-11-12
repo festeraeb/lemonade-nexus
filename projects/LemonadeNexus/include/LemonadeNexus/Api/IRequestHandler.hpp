@@ -26,6 +26,7 @@ namespace nexus::core {
     class ServerAdmissionService;
 }
 namespace nexus::auth { class AuthService; }
+namespace nexus::admission { class JoinGate; }
 namespace nexus::tree {
     class PermissionTreeService;
     class TreeOpSubmitter;
@@ -143,6 +144,8 @@ struct ApiContext {
     /// proof (Security/Upgrade/RolloutProof.hpp), or nullopt when it holds
     /// none. Public, self-verifying data; unset, the route answers 404.
     std::function<std::optional<std::string>()> rollout_proof;
+    /// Operator admission list for new devices (nullptr = open registration).
+    admission::JoinGate* join_gate{nullptr};
 };
 
 // ---------------------------------------------------------------------------

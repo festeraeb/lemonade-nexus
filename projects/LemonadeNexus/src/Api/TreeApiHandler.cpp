@@ -1,4 +1,6 @@
 #include <LemonadeNexus/Api/TreeApiHandler.hpp>
+#include <LemonadeNexus/Admission/JoinGate.hpp>
+#include <LemonadeNexus/Core/ApplicationRoot.hpp>
 
 #include <chrono>
 #include <filesystem>
@@ -1023,6 +1025,32 @@ void TreeApiHandler::do_register_routes(httplib::Server& pub, httplib::Server& p
             }
         }
 
+        // Operator admission list: an identity with no node yet must be on the list. One that
+        // already has a node is a returning device and is not asked again. Runs before the link
+        // token is consumed, so a refused join does not spend an invite.
+        if (ctx_.join_gate && !ctx_.tree.get_node(node_id)) {
+            const nlohmann::json hints = {
+                {"hostname", body.value("hostname", std::string{})},
+                {"cpu_id", body.value("cpu_id", std::string{})},
+                {"region", body.value("region", std::string{})},
+                {"has_invite", !body.value("link_token", std::string{}).empty()}};
+            const auto decision = ctx_.join_gate->admit(tree::canonical_principal(norm_pubkey),
+                                                        hints, req.remote_addr);
+            using V = admission::Verdict;
+            if (decision.verdict != V::Allowed) {
+                const int code = decision.verdict == V::Unavailable ? 503 : 403;
+                const char* status = decision.verdict == V::Pending  ? "pending_approval"
+                                     : decision.verdict == V::Banned ? "banned"
+                                                                     : "unavailable";
+                nlohmann::json j = {{"error", decision.message},
+                                    {"status", status},
+                                    {"request_id", decision.request_id}};
+                spdlog::info("[Join] {} held by admission: {}", node_id, status);
+                json_response(res, j, code);
+                return;
+            }
+        }
+
         // Optional link token (single use, minted via POST /api/link/token):
         // places a new endpoint under the token's target group, or makes an
         // existing device's identity a member of that group. Consuming it first
@@ -1810,6 +1838,115 @@ void TreeApiHandler::do_register_routes(httplib::Server& pub, httplib::Server& p
         spdlog::info("[TreeApi] deleted node '{}'", node_id);
         held.answer(res, resp);
     }));
+
+
+    // ========================================================================
+    // Operator admission: member list and k-line removal (PRIVATE, own bearer token).
+    // Registered only when admission_kick_token_file is configured. The token
+    // is read once at registration. The tree op is signed with the mesh root
+    // principal: only the root may remove another account's device.
+    // ========================================================================
+    if (!ctx_.config.admission_kick_token_file.empty()) {
+        std::string kick_token;
+        {
+            std::ifstream in(ctx_.config.admission_kick_token_file);
+            std::getline(in, kick_token);
+            while (!kick_token.empty() && (kick_token.back() == '\r' || kick_token.back() == ' '))
+                kick_token.pop_back();
+        }
+        if (kick_token.size() < 32) {
+            spdlog::error("[admission] kick token file missing or too short; kick routes off");
+        } else {
+            const auto authorized = [kick_token](const httplib::Request& req) {
+                const auto h = req.get_header_value("Authorization");
+                const std::string want = "Bearer " + kick_token;
+                if (h.size() != want.size()) return false;
+                unsigned char diff = 0;
+                for (size_t i = 0; i < h.size(); ++i) diff |= static_cast<unsigned char>(h[i] ^ want[i]);
+                return diff == 0;
+            };
+            priv.Get("/api/admission/members", [this, authorized](const httplib::Request& req,
+                                                                   httplib::Response& res) {
+                if (!authorized(req)) { error_response(res, "unauthorized", 401); return; }
+                nlohmann::json list = nlohmann::json::array();
+                for (const auto& [id, n] : ctx_.tree.nodes_snapshot()) {
+                    if (n.type != tree::NodeType::Endpoint) continue;
+                    list.push_back({{"node_id", id},
+                                    {"hostname", n.hostname},
+                                    {"parent_id", n.parent_id},
+                                    {"pubkey", tree::canonical_principal(n.mgmt_pubkey)},
+                                    {"tunnel_ip", n.tunnel_ip}});
+                }
+                json_response(res, {{"members", list}});
+            });
+            priv.Post("/api/admission/kick", [this, authorized](const httplib::Request& req,
+                                                                 httplib::Response& res) {
+                if (!authorized(req)) { error_response(res, "unauthorized", 401); return; }
+                auto body_opt = parse_body(req, res);
+                if (!body_opt || !body_opt->is_object()) return;
+                const auto key_in = body_opt->value("key", std::string{});
+                if (key_in.empty()) { error_response(res, "key required"); return; }
+                const auto key = tree::canonical_principal(normalize_pubkey(key_in));
+                const auto root = core::root_principal_from_hex(ctx_.config.root_pubkey);
+                if (!root) { error_response(res, "root key not configured", 500); return; }
+                auto* submitter = tree_op_submitter(ctx_, res);
+                if (!submitter) return;
+
+                const auto nodes = ctx_.tree.nodes_snapshot();
+                std::vector<std::string> endpoints, groups;
+                for (const auto& [id, n] : nodes) {
+                    if (tree::canonical_principal(n.mgmt_pubkey) != key) continue;
+                    if (n.type == tree::NodeType::Endpoint) endpoints.push_back(id);
+                    else if (n.type == tree::NodeType::Customer) groups.push_back(id);
+                }
+                // A group goes only if no other device lives in it.
+                std::vector<std::string> removable_groups;
+                for (const auto& g : groups) {
+                    bool others = false;
+                    for (const auto& [id, n] : nodes) {
+                        if (n.parent_id == g &&
+                            std::find(endpoints.begin(), endpoints.end(), id) == endpoints.end()) {
+                            others = true;
+                            break;
+                        }
+                    }
+                    if (!others) removable_groups.push_back(g);
+                }
+                nlohmann::json removed = nlohmann::json::array();
+                nlohmann::json failed  = nlohmann::json::array();
+                bool pending = false;
+                for (const auto* ids : {&endpoints, &removable_groups}) {
+                    for (const auto& id : *ids) {
+                        const auto s = submit_rebased(*submitter, [&] {
+                            tree::TreeOp op;
+                            op.kind      = tree::TreeOpKind::DeleteNode;
+                            op.target    = id;
+                            op.principal = *root;
+                            op.body.source = tree::TreeOpSource::Session;
+                            const auto current = ctx_.tree.get_node(id);
+                            op.base_version = current ? current->version : 0;
+                            return op;
+                        });
+                        if (s.pending) {
+                            pending = true;
+                            removed.push_back(id);
+                        } else if (s.verdict.ok()) {
+                            removed.push_back(id);
+                        } else {
+                            failed.push_back({{"node_id", id}, {"error", s.verdict.reason}});
+                        }
+                    }
+                }
+                spdlog::warn("[admission] k-line {}: removed {} node(s), {} failed",
+                             key.substr(0, 16), removed.size(), failed.size());
+                json_response(res, {{"success", failed.empty()},
+                                    {"removed", removed},
+                                    {"failed", failed},
+                                    {"pending", pending}},
+                              failed.empty() ? 200 : 502);
+            });
+        }
+    }
 
     // ========================================================================
     // POST /api/account/delete/challenge (PRIVATE, auth required)

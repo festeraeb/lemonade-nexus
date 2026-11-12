@@ -157,6 +157,9 @@ void from_json(const json& j, ServerConfig& c) {
     if (j.contains("transport_bridge_urls"))      j.at("transport_bridge_urls").get_to(c.transport_bridge_urls);
     if (j.contains("transport_bridge_max_connections")) j.at("transport_bridge_max_connections").get_to(c.transport_bridge_max_connections);
     if (j.contains("transport_bridge_max_per_ip"))      j.at("transport_bridge_max_per_ip").get_to(c.transport_bridge_max_per_ip);
+    if (j.contains("admission_gate_url"))         j.at("admission_gate_url").get_to(c.admission_gate_url);
+    if (j.contains("admission_token_file"))       j.at("admission_token_file").get_to(c.admission_token_file);
+    if (j.contains("admission_kick_token_file"))  j.at("admission_kick_token_file").get_to(c.admission_kick_token_file);
     if (j.contains("private_http_port"))          j.at("private_http_port").get_to(c.private_http_port);
     if (j.contains("onboard_request_ttl_sec"))   j.at("onboard_request_ttl_sec").get_to(c.onboard_request_ttl_sec);
     if (j.contains("onboard_max_pending"))       j.at("onboard_max_pending").get_to(c.onboard_max_pending);
