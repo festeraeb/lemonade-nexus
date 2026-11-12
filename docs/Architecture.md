@@ -217,6 +217,7 @@ address, or owner:
 | Field | Meaning |
 |---|---|
 | `service`, `peer_count`, `private_api_enabled` | This server: its service name, gossip peers, and whether the private API is enabled |
+| `started_at`, `uptime_sec` | When this server process started (Unix seconds) and the seconds since; `GET /api/health` carries both too |
 | `relay_sessions.paired`, `relay_sessions.waiting` | This server's relay: sessions with both sides bound, and sessions waiting for their second side |
 | `network.devices_registered` | Device (endpoint) nodes in the tree |
 | `network.devices_online`, `network.devices_offline` | Devices whose presence is younger than `kDevicePresenceOnlineSec` (10 s), and the rest |

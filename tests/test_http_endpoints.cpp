@@ -3381,6 +3381,27 @@ TEST_F(HttpEndpointTest, ARepeatOfAPendingJoinWaitsForItsOpInsteadOfOrderingAnot
     std::vector<tree::TreeOp> ops;
     const auto submitter_key = crypto->ed25519_keygen();
     tree::TreeOpSubmitter ordered(
+// Both public status answers carry the server's start time and uptime, so a
+// status page need not guess them. Old servers send neither field.
+TEST_F(PublicStatsTest, StatusAnswersCarryStartedAtAndUptime) {
+    const auto before = api::epoch_seconds();
+    for (const char* path : {"/api/stats", "/api/health"}) {
+        httplib::Client cli("127.0.0.1", pub_port);
+        auto res = cli.Get(path);
+        ASSERT_NE(res, nullptr) << path;
+        ASSERT_EQ(res->status, 200) << path;
+        const auto body = json::parse(res->body);
+        ASSERT_TRUE(body.contains("started_at")) << path << " " << body.dump();
+        ASSERT_TRUE(body.contains("uptime_sec")) << path << " " << body.dump();
+        const auto started = body["started_at"].get<uint64_t>();
+        const auto uptime = body["uptime_sec"].get<uint64_t>();
+        EXPECT_GT(started, 0u) << path;
+        EXPECT_LE(started, before) << path;
+        EXPECT_LE(uptime, api::epoch_seconds() - started + 1) << path;
+        EXPECT_GE(uptime + 1, before - started) << path;
+    }
+}
+
         *tree, *crypto, security::NetworkId{}, submitter_key,
         [&](tree::TreeOp op) {
             tree::TreeOpAdmission admission;

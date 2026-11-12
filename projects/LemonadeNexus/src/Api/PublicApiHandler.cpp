@@ -47,6 +47,8 @@ void PublicApiHandler::do_register_routes(httplib::Server& pub,
         resp.rp_id           = ctx_.config.rp_id;
         resp.dns_base_domain = ctx_.config.dns_base_domain;
         nlohmann::json j = resp;
+        j["started_at"] = started_at_;
+        j["uptime_sec"] = uptime_sec();
         json_response(res, j);
     });
 
@@ -87,6 +89,8 @@ void PublicApiHandler::do_register_routes(httplib::Server& pub,
             {"service",             "lemonade-nexus"},
             {"peer_count",          peers.size()},
             {"private_api_enabled", !ctx_.tunnel_bind_ip.empty()},
+            {"started_at",          started_at_},
+            {"uptime_sec",          uptime_sec()},
             // This server's relay only.
             {"relay_sessions", {{"paired", relay_paired},
                                 {"waiting", relay_sessions - std::min(relay_paired, relay_sessions)}}},

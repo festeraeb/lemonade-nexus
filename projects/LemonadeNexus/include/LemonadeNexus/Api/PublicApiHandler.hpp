@@ -34,7 +34,7 @@ class PublicApiHandler : public IRequestHandler<PublicApiHandler> {
     friend class IRequestHandler<PublicApiHandler>;
 
 public:
-    explicit PublicApiHandler(ApiContext& ctx) : ctx_(ctx) {}
+    explicit PublicApiHandler(ApiContext& ctx) : ctx_(ctx), started_at_(epoch_seconds()) {}
 
 private:
     void do_register_routes(httplib::Server& pub, httplib::Server& priv);
@@ -43,7 +43,15 @@ private:
     /// kNetworkCountsCacheSec. Thread-safe.
     NetworkCounts network_counts(uint64_t now);
 
+    [[nodiscard]] uint64_t uptime_sec() const {
+        const auto now = epoch_seconds();
+        return now > started_at_ ? now - started_at_ : 0;
+    }
+
     ApiContext& ctx_;
+    /// Unix seconds when this handler (the server, in the assembled process)
+    /// started; GET /api/health and /api/stats report it with the uptime.
+    uint64_t started_at_;
 
     std::mutex     counts_mutex_;
     NetworkCounts  counts_;
