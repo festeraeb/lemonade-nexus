@@ -18,6 +18,10 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <arpa/inet.h>
+#include <netinet/in.h>
+#include <sys/socket.h>
+#include <unistd.h>
 #include <atomic>
 #include <chrono>
 #include <mutex>
@@ -106,6 +110,7 @@ protected:
         api.Get("/ping", [](const httplib::Request&, httplib::Response& res) {
             res.set_content("pong-through-relay", "text/plain");
         });
+
         api_port = api.bind_to_any_port("127.0.0.1");
         ASSERT_GT(api_port, 0);
         api_thread = std::thread([this] { api.listen_after_bind(); });
@@ -439,6 +444,148 @@ TEST_F(SdkRelayFallbackTest, FallbackMovesUnreachablePeersOntoTheRelay) {
     alice_fallback.maintain({}, true);
     EXPECT_TRUE(bob_fallback.relayed_peers().empty());
     EXPECT_TRUE(eventually([&] { return r->session_count() == 0; }, [] {}, 2s));
+}
+
+namespace {
+
+/// A UDP socket that receives and never answers: a relay port on a network
+/// that drops UDP. Counts what reaches it.
+struct UdpBlackhole {
+    int sock{-1};
+    uint16_t port{0};
+    std::atomic<int> received{0};
+    std::atomic<bool> run{true};
+    std::thread thread;
+    UdpBlackhole() {
+        sock = ::socket(AF_INET, SOCK_DGRAM, 0);
+        sockaddr_in a{};
+        a.sin_family = AF_INET;
+        a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        ::bind(sock, reinterpret_cast<sockaddr*>(&a), sizeof a);
+        socklen_t len = sizeof a;
+        ::getsockname(sock, reinterpret_cast<sockaddr*>(&a), &len);
+        port = ntohs(a.sin_port);
+        timeval tv{0, 50 * 1000};
+        ::setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+        thread = std::thread([this] {
+            char buf[2048];
+            while (run) {
+                if (::recv(sock, buf, sizeof buf, 0) > 0) ++received;
+            }
+        });
+    }
+    ~UdpBlackhole() {
+        run = false;
+        thread.join();
+        ::close(sock);
+    }
+};
+
+/// The transport bridge on a plain-HTTP listener, relay route only.
+struct RelayBridge {
+    network::TransportBridge bridge;
+    httplib::Server listener;
+    int port{0};
+    std::thread thread;
+    explicit RelayBridge(uint16_t relay_port) {
+        bridge.add_target("relay", relay_port);
+        bridge.register_routes(listener);
+        port = listener.bind_to_any_port("127.0.0.1");
+        thread = std::thread([this] { listener.listen_after_bind(); });
+        listener.wait_until_ready();
+    }
+    ~RelayBridge() {
+        bridge.stop();
+        listener.stop();
+        thread.join();
+    }
+    std::string url() const {
+        return "ws://127.0.0.1:" + std::to_string(port) + network::kTransportBridgePathPrefix + "relay";
+    }
+};
+
+}  // namespace
+
+// A 443-only network for Bob: the relay's UDP port does not answer him. The
+// fallback notices the unanswered UDP allocation and opens the same relay
+// session through the relay's WebSocket route on its own; Alice stays on
+// UDP. The relay pairs them, and traffic flows.
+TEST_F(SdkRelayFallbackTest, FallbackUsesTheWebSocketRouteWhenUdpToTheRelayIsBlocked) {
+    UdpBlackhole blocked;
+    RelayBridge bridge(r->local_port());
+    lnsdk::RelayFallback alice_fallback(
+        alice, [&](const std::string& relay_id) {
+            return lnsdk::Result<lnsdk::RelayTicket>{true, sdk_ticket("alice", relay_id), 200, ""};
+        },
+        [this] {
+            return std::vector<lnsdk::RelayCandidate>{{"relay-1", "127.0.0.1", r->local_port(), ""}};
+        },
+        fast_timing());
+    lnsdk::RelayFallback bob_fallback(
+        bob, [&](const std::string& relay_id) {
+            return lnsdk::Result<lnsdk::RelayTicket>{true, sdk_ticket("bob", relay_id), 200, ""};
+        },
+        [&] {
+            return std::vector<lnsdk::RelayCandidate>{
+                {"relay-1", "127.0.0.1", blocked.port, bridge.url()}};
+        },
+        fast_timing());
+    const std::vector<lnsdk::MeshPeer> alice_peers = {peer(bob_keys.second, "10.64.0.3/32")};
+    const std::vector<lnsdk::MeshPeer> bob_peers = {peer(alice_keys.second, "10.64.0.2/32")};
+    ASSERT_TRUE(eventually(
+        [&] {
+            return alice_fallback.relayed_peers().contains(bob_keys.second) &&
+                   bob_fallback.relayed_peers().contains(alice_keys.second);
+        },
+        [&] {
+            alice_fallback.maintain(alice_peers, true);
+            bob_fallback.maintain(bob_peers, true);
+        },
+        20s));
+    EXPECT_GT(blocked.received.load(), 0) << "the UDP route was tried first";
+    EXPECT_EQ(bob_fallback.relayed_peers().at(alice_keys.second), bridge.url());
+    EXPECT_EQ(ping_over_mesh(bob, "10.64.0.2"), "pong-through-relay");
+    EXPECT_GT(bridge.bridge.counters().datagrams_up, 0u);
+    EXPECT_EQ(r->paired_session_count(), 1u);
+}
+
+// When the mesh already knows UDP is blocked (its server path runs over the
+// WebSocket), the first relay request goes through the WebSocket route.
+TEST_F(SdkRelayFallbackTest, AUdpBlockedHintUsesTheWebSocketRouteAtOnce) {
+    UdpBlackhole blocked;
+    RelayBridge bridge(r->local_port());
+    lnsdk::RelayFallback alice_fallback(
+        alice, [&](const std::string& relay_id) {
+            return lnsdk::Result<lnsdk::RelayTicket>{true, sdk_ticket("alice", relay_id), 200, ""};
+        },
+        [this] {
+            return std::vector<lnsdk::RelayCandidate>{{"relay-1", "127.0.0.1", r->local_port(), ""}};
+        },
+        fast_timing());
+    lnsdk::RelayFallback bob_fallback(
+        bob, [&](const std::string& relay_id) {
+            return lnsdk::Result<lnsdk::RelayTicket>{true, sdk_ticket("bob", relay_id), 200, ""};
+        },
+        [&] {
+            return std::vector<lnsdk::RelayCandidate>{
+                {"relay-1", "127.0.0.1", blocked.port, bridge.url()}};
+        },
+        fast_timing());
+    bob_fallback.set_udp_blocked_hint([] { return true; });
+    const std::vector<lnsdk::MeshPeer> alice_peers = {peer(bob_keys.second, "10.64.0.3/32")};
+    const std::vector<lnsdk::MeshPeer> bob_peers = {peer(alice_keys.second, "10.64.0.2/32")};
+    ASSERT_TRUE(eventually(
+        [&] {
+            return alice_fallback.relayed_peers().contains(bob_keys.second) &&
+                   bob_fallback.relayed_peers().contains(alice_keys.second);
+        },
+        [&] {
+            alice_fallback.maintain(alice_peers, true);
+            bob_fallback.maintain(bob_peers, true);
+        },
+        10s));
+    EXPECT_EQ(blocked.received.load(), 0);
+    EXPECT_EQ(ping_over_mesh(bob, "10.64.0.2"), "pong-through-relay");
 }
 
 TEST_F(SdkRelayFallbackTest, ARefusingRelayIsSkippedForTheNextOne) {

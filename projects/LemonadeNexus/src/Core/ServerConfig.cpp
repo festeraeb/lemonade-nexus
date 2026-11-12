@@ -152,6 +152,7 @@ void from_json(const json& j, ServerConfig& c) {
     if (j.contains("ddns_update_interval_sec"))   j.at("ddns_update_interval_sec").get_to(c.ddns_update_interval_sec);
     if (j.contains("ddns_enabled"))               j.at("ddns_enabled").get_to(c.ddns_enabled);
     if (j.contains("transport_bridge"))           j.at("transport_bridge").get_to(c.transport_bridge);
+    if (j.contains("transport_bridge_urls"))      j.at("transport_bridge_urls").get_to(c.transport_bridge_urls);
     if (j.contains("private_http_port"))          j.at("private_http_port").get_to(c.private_http_port);
     if (j.contains("onboard_request_ttl_sec"))   j.at("onboard_request_ttl_sec").get_to(c.onboard_request_ttl_sec);
     if (j.contains("onboard_max_pending"))       j.at("onboard_max_pending").get_to(c.onboard_max_pending);

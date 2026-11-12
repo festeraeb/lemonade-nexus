@@ -49,6 +49,7 @@
 #include <span>
 #include <string>
 #include <thread>
+#include <vector>
 
 namespace nexus::boringtun {
 class UserspaceDataplane;
@@ -145,9 +146,15 @@ public:
     struct Options {
         std::string peer_pubkey;    ///< base64 mesh public key of the peer
         std::string udp_endpoint;   ///< "a.b.c.d:port" of the peer
-        /// The WSS rung. inner_port is set by the mux to the dataplane port.
-        /// An empty url disables the rung.
+        /// The WSS rung's tunnel settings. inner_port is set by the mux to
+        /// the dataplane port; url is replaced by the entries of wss_urls.
         WssTunnel::Options wss;
+        /// The WSS routes in preference order. A tunnel that fails (no
+        /// connection, a refused upgrade, or a closed connection) moves the
+        /// rung to the next route; the reopen backoff applies only after
+        /// every route failed in a row. Empty: wss.url alone, and no WSS
+        /// rung when that is empty too.
+        std::vector<std::string> wss_urls;
         /// Our tunnel address (dotted), the probe source, and the peer's,
         /// the probe target. Without both, the mux races and keeps the
         /// winner but does not fail over (no liveness signal).
@@ -179,6 +186,8 @@ public:
         int64_t       last_outage_ms{-1};
         int64_t       last_recover_ms{-1};
         int64_t       rtt_us{-1};          ///< newest probe round trip
+        std::string   wss_url;             ///< the route the open tunnel uses
+        uint64_t      wss_route_changes{0};
     };
 
     TransportMux(nexus::boringtun::UserspaceDataplane& dataplane, Options options);

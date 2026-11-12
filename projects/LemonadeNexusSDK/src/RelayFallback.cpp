@@ -1,4 +1,5 @@
 #include <LemonadeNexusSDK/RelayFallback.hpp>
+#include <LemonadeNexusSDK/WssTunnel.hpp>
 
 #include <LemonadeNexusSDK/BoringtunMesh.hpp>
 #include <LemonadeNexusSDK/RelayChannel.hpp>
@@ -83,10 +84,7 @@ void RelayFallback::schedule_retry(PeerState& state) {
 
 void RelayFallback::abandon(const std::string& pubkey, PeerState& state, bool blame_relay,
                             bool peer_absent) {
-    if (state.channel) {
-        state.channel->close();
-        state.channel.reset();
-    }
+    close_channel(state);
     if (state.applied) {
         mesh_.clear_peer_relay(pubkey);
         state.applied = false;
@@ -108,10 +106,7 @@ void RelayFallback::abandon(const std::string& pubkey, PeerState& state, bool bl
 
 void RelayFallback::promote_direct(const std::string& pubkey, PeerState& state,
                                    const std::string& listed_endpoint) {
-    if (state.channel) {
-        state.channel->close();
-        state.channel.reset();
-    }
+    close_channel(state);
     // The dataplane already sends to the direct address. Keep it there, and
     // keep the handshake that proved it: no abandon time, no backoff.
     mesh_.clear_peer_relay(pubkey, listed_endpoint);
@@ -127,10 +122,7 @@ void RelayFallback::promote_direct(const std::string& pubkey, PeerState& state,
 }
 
 void RelayFallback::release_unused(const std::string& pubkey, PeerState& state, const char* why) {
-    if (state.channel) {
-        state.channel->close();
-        state.channel.reset();
-    }
+    close_channel(state);
     if (state.applied) {
         mesh_.clear_peer_relay(pubkey);
         state.applied = false;
@@ -149,6 +141,7 @@ void RelayFallback::reset_backoff() {
         state.unproven_relay.clear();
     }
     cooldown_.clear();
+    udp_unreachable_.clear();
     candidate_cache_.clear();
 }
 
@@ -190,11 +183,19 @@ std::vector<RelayCandidate> RelayFallback::usable_candidates(Clock::time_point n
 
 bool RelayFallback::open_channel(PeerState& state, const MeshPeer& peer,
                                  const RelayCandidate& relay) {
-    const auto ip = resolve_relay_ipv4(relay.host);
-    if (!ip) {
-        spdlog::warn("[RelayFallback] relay host {} does not resolve", relay.host);
-        cooldown_[relay.relay_id] = Clock::now() + timing_.relay_cooldown;
-        return false;
+    const auto now = Clock::now();
+    std::erase_if(udp_unreachable_, [now](const auto& e) { return e.second <= now; });
+    const bool use_wss = !relay.wss_url.empty() &&
+                         ((udp_blocked_hint_ && udp_blocked_hint_()) ||
+                          udp_unreachable_.contains(relay.relay_id));
+    std::optional<std::string> ip;
+    if (!use_wss) {
+        ip = resolve_relay_ipv4(relay.host);
+        if (!ip) {
+            spdlog::warn("[RelayFallback] relay host {} does not resolve", relay.host);
+            cooldown_[relay.relay_id] = now + timing_.relay_cooldown;
+            return false;
+        }
     }
     const auto ticket = tickets_ ? tickets_(relay.relay_id) : Result<RelayTicket>{};
     if (!ticket.ok) {
@@ -210,9 +211,19 @@ bool RelayFallback::open_channel(PeerState& state, const MeshPeer& peer,
     const uint16_t dataplane_port = mesh_.bound_port();
     if (allocate.empty() || dataplane_port == 0) return false;
 
+    // Over the WebSocket route, the channel's relay address is the tunnel's
+    // local endpoint; the channel itself is unchanged.
+    std::unique_ptr<WssTunnel> tunnel;
+    if (use_wss) {
+        tunnel = std::make_unique<WssTunnel>();
+        WssTunnel::Options topts;
+        topts.url = relay.wss_url;
+        if (!tunnel->open(std::move(topts))) return false;
+    }
+
     RelayChannel::Options options;
-    options.relay_ipv4 = *ip;
-    options.relay_port = relay.port;
+    options.relay_ipv4 = use_wss ? std::string("127.0.0.1") : *ip;
+    options.relay_port = use_wss ? tunnel->local_port() : relay.port;
     options.dataplane_port = dataplane_port;
     options.allocate = std::move(allocate);
     options.allocate_retry = timing_.allocate_retry;
@@ -221,14 +232,32 @@ bool RelayFallback::open_channel(PeerState& state, const MeshPeer& peer,
     auto channel = std::make_unique<RelayChannel>();
     if (!channel->open(std::move(options))) return false;
 
+    state.tunnel = std::move(tunnel);
     state.channel = std::move(channel);
     state.relay_id = relay.relay_id;
+    state.relay_wss_url = relay.wss_url;
+    state.relay_label = use_wss ? relay.wss_url : state.channel->relay_endpoint();
     state.opened_unix = unix_now();
     state.renewed = false;
     state.window = window;
     spdlog::info("[RelayFallback] peer {} has no direct path; allocating at relay {}",
-                 short_key(peer.mesh_pubkey), state.channel->relay_endpoint());
+                 short_key(peer.mesh_pubkey), state.relay_label);
     return true;
+}
+
+void RelayFallback::close_channel(PeerState& state) {
+    if (state.channel) {
+        state.channel->close();
+        state.channel.reset();
+    }
+    if (state.tunnel) {
+        state.tunnel->close();
+        state.tunnel.reset();
+    }
+}
+
+void RelayFallback::set_udp_blocked_hint(std::function<bool()> hint) {
+    udp_blocked_hint_ = std::move(hint);
 }
 
 std::chrono::steady_clock::time_point RelayFallback::maintain(const std::vector<MeshPeer>& peers,
@@ -321,8 +350,7 @@ std::chrono::steady_clock::time_point RelayFallback::maintain(const std::vector<
                 window_now != state.window) {
                 spdlog::info("[RelayFallback] rendezvous window ended for peer {}; asking again",
                              short_key(pubkey));
-                state.channel->close();
-                state.channel.reset();
+                close_channel(state);
                 state.next_attempt = {};
                 if (open_count > 0) --open_count;
             }
@@ -335,7 +363,7 @@ std::chrono::steady_clock::time_point RelayFallback::maintain(const std::vector<
             switch (state.channel->state()) {
                 case RelayChannel::State::Paired:
                     if (!state.applied) {
-                        const auto relay_endpoint = state.channel->relay_endpoint();
+                        const auto relay_endpoint = state.relay_label;
                         if (mesh_.set_peer_relay(pubkey, state.channel->local_endpoint(),
                                                  relay_endpoint)) {
                             state.applied = true;
@@ -439,6 +467,20 @@ std::chrono::steady_clock::time_point RelayFallback::maintain(const std::vector<
                     // from before a restart or a suspension, until its
                     // pending limit ends. The peer keeps choosing this relay,
                     // so a cooldown here split the two sides between relays.
+                    // UDP to this relay got no answer at all, and the relay
+                    // has a WebSocket route: the network likely drops UDP.
+                    // Try the same relay over the WebSocket at once, without
+                    // blame, so both sides keep choosing it.
+                    if (why == RelayChannel::Failure::NoReply && !state.tunnel &&
+                        !state.relay_wss_url.empty()) {
+                        spdlog::info("[RelayFallback] relay {} did not answer over UDP; using "
+                                     "its WebSocket route",
+                                     state.relay_id);
+                        udp_unreachable_[state.relay_id] = now + timing_.relay_cooldown;
+                        close_channel(state);
+                        state.next_attempt = {};
+                        break;
+                    }
                     abandon(pubkey, state,
                             why == RelayChannel::Failure::NoReply ||
                                 why == RelayChannel::Failure::Refused ||
@@ -506,7 +548,7 @@ std::chrono::steady_clock::time_point RelayFallback::maintain(const std::vector<
 
 void RelayFallback::stop() {
     for (auto& [pubkey, state] : peers_) {
-        if (state.channel) state.channel->close();
+        close_channel(state);
         if (state.applied) mesh_.clear_peer_relay(pubkey);
     }
     peers_.clear();

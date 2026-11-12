@@ -36,6 +36,13 @@ math(EXPR _ln_httplib_version
      "${CMAKE_MATCH_1} * 100000 + ${CMAKE_MATCH_2} * 1000 + ${CMAKE_MATCH_3}")
 target_compile_definitions(httplib INTERFACE LEMONADE_NEXUS_HTTPLIB_VERSION=${_ln_httplib_version})
 
+# Largest WebSocket message, in bytes. The reader refuses a larger frame
+# before it allocates. Nexus WebSockets carry one datagram per message (the
+# transport bridge, at most 65535 bytes) or a small event (the event
+# socket), so 64 KiB bounds the memory one connection can make the server
+# allocate (the library default is 16 MiB).
+target_compile_definitions(httplib INTERFACE CPPHTTPLIB_WEBSOCKET_MAX_PAYLOAD_LENGTH=65536)
+
 # The non-blocking getaddrinfo uses CFHost on every Apple platform, but
 # cpp-httplib links CFNetwork only for macOS ($<PLATFORM_ID:Darwin>).
 if(CMAKE_SYSTEM_NAME STREQUAL "iOS")

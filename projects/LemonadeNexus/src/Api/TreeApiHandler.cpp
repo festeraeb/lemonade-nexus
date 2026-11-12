@@ -1092,6 +1092,9 @@ void TreeApiHandler::do_register_routes(httplib::Server& pub, httplib::Server& p
         if (membership) resp["membership"] = *membership;
         if (ctx_.config.transport_bridge) {
             resp["mesh_wss_path"] = std::string(network::kTransportBridgePathPrefix) + "dataplane";
+            if (!ctx_.config.transport_bridge_urls.empty()) {
+                resp["mesh_wss_urls"] = ctx_.config.transport_bridge_urls;
+            }
         }
         spdlog::info("[Join] node={} tunnel_ip={} mesh_endpoint={} private_fqdn={}",
                       node_id, alloc.base_network, mesh_endpoint, client_private_fqdn);

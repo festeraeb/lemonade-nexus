@@ -83,6 +83,10 @@ struct ServerConfig {
     /// transport port and relay port, for clients on networks that block
     /// UDP. Default off.
     bool        transport_bridge{false};
+    /// Other public routes to this server's bridge dataplane route, absolute
+    /// "wss://" URLs (for example through a tunnel provider). Clients try
+    /// them in order after the route on the public listener.
+    std::vector<std::string> transport_bridge_urls;
 
     // First-run CLI mode: initialize the data directory (identity + gossip
     // keypairs), print onboarding info (pubkeys, node ID, next steps), and exit.

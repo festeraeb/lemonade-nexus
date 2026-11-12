@@ -88,8 +88,8 @@ bool TransportBridge::add_target(const std::string& name, uint16_t udp_port) {
 void TransportBridge::register_routes(httplib::Server& server) {
     for (const auto& [name, port] : targets_) {
         server.WebSocket(kTransportBridgePathPrefix + name,
-                         [this, port = port](const httplib::Request&, httplib::ws::WebSocket& ws) {
-                             serve(port, ws);
+                         [this, port = port](const httplib::Request& req, httplib::ws::WebSocket& ws) {
+                             serve(req.remote_addr, port, ws);
                          });
     }
 }
@@ -112,29 +112,48 @@ TransportBridge::Counters TransportBridge::counters() const {
     c.bytes_up = bytes_up_.load();
     c.bytes_down = bytes_down_.load();
     c.dropped = dropped_.load();
+    c.refused_per_ip = refused_per_ip_.load();
+    c.closed_oversize = closed_oversize_.load();
+    c.closed_idle = closed_idle_.load();
     return c;
 }
 
-bool TransportBridge::admit() {
+bool TransportBridge::admit(const std::string& client_ip, bool& per_ip) {
+    per_ip = false;
     if (stopping_.load()) return false;
-    std::size_t current = active_.load();
-    while (current < limits_.max_connections) {
-        if (active_.compare_exchange_weak(current, current + 1)) return true;
+    std::lock_guard lock(ip_mtx_);
+    if (active_.load() >= limits_.max_connections) return false;
+    auto& count = per_ip_[client_ip];
+    if (count >= limits_.max_per_ip) {
+        if (count == 0) per_ip_.erase(client_ip);
+        per_ip = true;
+        return false;
     }
-    return false;
+    ++count;
+    active_.fetch_add(1);
+    return true;
 }
 
-void TransportBridge::release() { active_.fetch_sub(1); }
+void TransportBridge::release(const std::string& client_ip) {
+    std::lock_guard lock(ip_mtx_);
+    if (auto it = per_ip_.find(client_ip); it != per_ip_.end() && --it->second == 0) {
+        per_ip_.erase(it);
+    }
+    active_.fetch_sub(1);
+}
 
-void TransportBridge::serve(uint16_t udp_port, httplib::ws::WebSocket& ws) {
-    if (!admit()) {
+void TransportBridge::serve(const std::string& client_ip, uint16_t udp_port,
+                            httplib::ws::WebSocket& ws) {
+    bool per_ip = false;
+    if (!admit(client_ip, per_ip)) {
         refused_.fetch_add(1);
+        if (per_ip) refused_per_ip_.fetch_add(1);
         ws.close(httplib::ws::CloseStatus::GoingAway, "bridge busy");
         return;
     }
     const udp_socket_t sock = open_target_socket(udp_port);
     if (sock == kNoSocket) {
-        release();
+        release(client_ip);
         refused_.fetch_add(1);
         ws.close(httplib::ws::CloseStatus::InternalError, "no target");
         return;
@@ -172,7 +191,10 @@ void TransportBridge::serve(uint16_t udp_port, httplib::ws::WebSocket& ws) {
     while (!done.load() && !stopping_.load()) {
         const auto r = ws.read(msg);
         if (r == httplib::ws::ReadResult::Timeout) {
-            if (steady_ms() - last_activity.load() > idle_ms) break;
+            if (steady_ms() - last_activity.load() > idle_ms) {
+                closed_idle_.fetch_add(1);
+                break;
+            }
             continue;
         }
         if (r == httplib::ws::ReadResult::Fail) break;
@@ -187,8 +209,9 @@ void TransportBridge::serve(uint16_t udp_port, httplib::ws::WebSocket& ws) {
             continue;
         }
         if (msg.size() > limits_.max_datagram) {
-            dropped_.fetch_add(1);
-            continue;
+            closed_oversize_.fetch_add(1);
+            ws.close(httplib::ws::CloseStatus::MessageTooBig, "one datagram per message");
+            break;
         }
         ::send(sock, msg.data(), static_cast<int>(msg.size()), 0);
         datagrams_up_.fetch_add(1);
@@ -199,8 +222,11 @@ void TransportBridge::serve(uint16_t udp_port, httplib::ws::WebSocket& ws) {
     done.store(true);
     down.join();
     close_udp(sock);
+    // Free the slot before the close handshake: a peer that never answers
+    // the close frame (a silent or broken client) holds only this thread,
+    // for the library's close timeout, not a bridge slot.
+    release(client_ip);
     if (ws.is_open()) ws.close(httplib::ws::CloseStatus::GoingAway, "bridge closed");
-    release();
 }
 
 }  // namespace nexus::network

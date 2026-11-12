@@ -173,6 +173,7 @@ listener in place. There is no plaintext fallback.
 | CLI Flag | Env Var | JSON Key | Default | Description |
 |----------|---------|----------|---------|-------------|
 | `--transport-bridge` | `SP_TRANSPORT_BRIDGE=1` | `transport_bridge` | `false` | Serve WebSocket routes to the mesh transport port and the relay port on the public HTTPS listener |
+| | | `transport_bridge_urls` | `[]` | Other absolute `wss://` routes to this server's dataplane bridge route; the join answer lists them in `mesh_wss_urls` and clients fail over to them in order |
 
 With the bridge on, `GET /api/transport/ws/dataplane` and
 `GET /api/transport/ws/relay` upgrade to a WebSocket on the public HTTPS

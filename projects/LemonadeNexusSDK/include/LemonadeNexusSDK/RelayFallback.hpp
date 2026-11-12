@@ -61,6 +61,7 @@ namespace lnsdk {
 
 class BoringtunMesh;
 class RelayChannel;
+class WssTunnel;
 
 /// A relay the client may use. `relay_id` is the relay's base64 node identity
 /// key, the id the relay ticket must name.
@@ -68,6 +69,11 @@ struct RelayCandidate {
     std::string relay_id;
     std::string host;        ///< DNS name or dotted IPv4 address
     uint16_t    port{9103};
+    /// The relay's transport bridge relay route
+    /// ("wss://host:port/api/transport/ws/relay"), or empty. The fallback
+    /// uses it when UDP to the relay gets no answer, or when the UDP-blocked
+    /// hint says UDP is blocked (set_udp_blocked_hint).
+    std::string wss_url;
 };
 
 /// How long a direct endpoint has to answer the first punch burst before
@@ -183,6 +189,12 @@ public:
     /// Close every channel and move every relayed peer off its relay.
     void stop();
 
+    /// True while this device knows UDP is blocked (for example: the path to
+    /// the session server runs over the WebSocket). Relay requests then go
+    /// through a candidate's WebSocket route from the first attempt. Empty:
+    /// never. Call before the first maintain().
+    void set_udp_blocked_hint(std::function<bool()> hint);
+
     /// Unix seconds now, as the rendezvous window is computed from it.
     using UnixClock = std::function<int64_t()>;
 
@@ -242,8 +254,15 @@ private:
     using Clock = std::chrono::steady_clock;
 
     struct PeerState {
+        /// Declared before the channel: the channel closes first and sends
+        /// its Teardown through the tunnel.
+        std::unique_ptr<WssTunnel>    tunnel;  ///< set when the channel uses the WebSocket route
         std::unique_ptr<RelayChannel> channel;
         std::string                   relay_id;
+        /// What status reports as the relay: "ip:port", or the WebSocket URL.
+        std::string                   relay_label;
+        /// The relay's WebSocket route, empty when it has none.
+        std::string                   relay_wss_url;
         Clock::time_point             direct_since{};  ///< Start of the direct grace period
         Clock::time_point             eager_until{};   ///< End of the eager period
         Clock::time_point             lan_since{};     ///< Start of the LAN window
@@ -286,6 +305,8 @@ private:
     /// relay's fault. `why` completes the log line.
     void release_unused(const std::string& pubkey, PeerState& state, const char* why);
     void schedule_retry(PeerState& state);
+    /// Close the channel, then its tunnel.
+    static void close_channel(PeerState& state);
     std::vector<RelayCandidate> usable_candidates(Clock::time_point now);
 
     BoringtunMesh&  mesh_;
@@ -295,6 +316,10 @@ private:
 
     std::map<std::string, PeerState>         peers_;     // by mesh public key
     std::map<std::string, Clock::time_point> cooldown_;  // relay_id -> skip until
+    /// relay_id -> until when its UDP port is taken as unreachable from here
+    /// (an allocation got no answer and the relay has a WebSocket route).
+    std::map<std::string, Clock::time_point> udp_unreachable_;
+    std::function<bool()>                    udp_blocked_hint_;
     std::vector<RelayCandidate>              candidate_cache_;
     UnixClock                                window_clock_;  // empty: the system clock
     Clock::time_point                        candidates_at_{};

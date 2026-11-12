@@ -202,6 +202,9 @@ struct TransportMux::Impl {
     Clock::time_point          next_wss_open{};
     std::chrono::milliseconds  wss_backoff{0};
     Stats                      stats;
+    std::size_t                route{0};          // index into opts.wss_urls
+    std::size_t                route_failures{0}; // routes failed in a row
+    std::optional<std::size_t> opened_route;      // route of the newest tunnel
     // Failover measurement: the last reply on the rung that died, and the
     // move away from it. Reset when the first reply on the new rung arrives.
     bool                       measuring{false};
@@ -221,9 +224,10 @@ struct TransportMux::Impl {
         peer_ip = parse_ipv4(opts.peer_ip).value_or(0);
         randombytes_buf(&ident, sizeof ident);
         wss_backoff = opts.wss_reopen_min;
+        if (opts.wss_urls.empty() && !opts.wss.url.empty()) opts.wss_urls.push_back(opts.wss.url);
     }
 
-    bool wss_enabled() const { return !opts.wss.url.empty(); }
+    bool wss_enabled() const { return !opts.wss_urls.empty(); }
 
     /// The rung of an endpoint string. Caller holds mtx.
     TransportPath classify_locked(const std::string& endpoint) const {
@@ -251,27 +255,42 @@ struct TransportMux::Impl {
             const auto st = tunnel->state();
             if (st == WssTunnel::State::Open) {
                 wss_backoff = opts.wss_reopen_min;
+                route_failures = 0;
                 return;
             }
             if (st == WssTunnel::State::Connecting) return;
-            // Failed: release it and schedule the next one.
+            // Failed: release it and move to the next route. Back off only
+            // when every route failed in a row.
+            spdlog::info("[TransportMux] WSS route {} failed", opts.wss_urls[route]);
             tunnel->close();
             tunnel.reset();
             wss_ep.clear();
-            next_wss_open = now + wss_backoff;
-            wss_backoff = std::min(wss_backoff * 2, opts.wss_reopen_max);
+            stats.wss_url.clear();
+            route = (route + 1) % opts.wss_urls.size();
+            if (++route_failures >= opts.wss_urls.size()) {
+                route_failures = 0;
+                next_wss_open = now + wss_backoff;
+                wss_backoff = std::min(wss_backoff * 2, opts.wss_reopen_max);
+            } else {
+                next_wss_open = now;
+            }
             return;
         }
         if (now < next_wss_open) return;
         auto fresh = std::make_unique<WssTunnel>();
         auto wopts = opts.wss;
+        wopts.url = opts.wss_urls[route];
         wopts.inner_port = dp.bound_port();
         if (!fresh->open(std::move(wopts))) {
+            route = (route + 1) % opts.wss_urls.size();
             next_wss_open = now + wss_backoff;
             wss_backoff = std::min(wss_backoff * 2, opts.wss_reopen_max);
             return;
         }
+        if (opened_route && *opened_route != route) ++stats.wss_route_changes;
+        opened_route = route;
         wss_ep = fresh->local_endpoint();
+        stats.wss_url = opts.wss_urls[route];
         tunnel = std::move(fresh);
     }
 

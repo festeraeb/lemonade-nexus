@@ -388,11 +388,12 @@ struct BoringtunConfig {
     /// private API answers. No mesh peer may claim it (see
     /// BoringtunMesh::peer_allowed_ips). Empty when unknown.
     std::string server_tunnel_ip;
-    /// The server's transport bridge route for the dataplane
-    /// ("wss://host:port/api/transport/ws/dataplane"). When set, the mesh
-    /// races UDP against this TLS WebSocket path to the server and fails
-    /// over between them (TransportMux). Empty: UDP only.
-    std::string wss_url;
+    /// The server's transport bridge routes for the dataplane
+    /// ("wss://host:port/api/transport/ws/dataplane"), in preference order.
+    /// When set, the mesh races UDP against a TLS WebSocket path to the
+    /// server and fails over between them (TransportMux); a route that fails
+    /// moves the WebSocket path to the next one. Empty: UDP only.
+    std::vector<std::string> wss_urls;
 };
 
 struct TunnelStatus {

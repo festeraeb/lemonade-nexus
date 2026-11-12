@@ -111,6 +111,9 @@ MeshOrchestrator::MeshOrchestrator(LemonadeNexusClient& client,
             return client_.request_relay_ticket(node_id_, relay_id);
         },
         [this] { return relay_candidates(); });
+    // The path to the session server runs over the WebSocket only when UDP
+    // to it failed: relay requests then use WebSocket routes at once.
+    relay_fallback_->set_udp_blocked_hint([this] { return mesh_.server_path() == "wss"; });
     hole_puncher_ = std::make_unique<HolePuncher>(mesh_);
 }
 
@@ -771,8 +774,15 @@ std::vector<RelayCandidate> MeshOrchestrator::relay_candidates() {
         }
     }
     // Verified Tier 1 servers: their relay id is their node identity.
+    // Their public HTTPS listener carries the transport bridge relay route
+    // when the server serves the bridge; a server without it refuses the
+    // upgrade and the WebSocket attempt fails like an unanswered relay.
     for (const auto& server : membership.servers) {
-        out.push_back({server.node_id, server.host, kRelayPort});
+        std::string wss;
+        if (!server.host.empty() && server.port != 0) {
+            wss = "wss://" + server.host + ":" + std::to_string(server.port) + "/api/transport/ws/relay";
+        }
+        out.push_back({server.node_id, server.host, kRelayPort, std::move(wss)});
     }
     // Relays the session's server lists. Tier 2 relays appear here.
     auto listed = client_.list_relays();

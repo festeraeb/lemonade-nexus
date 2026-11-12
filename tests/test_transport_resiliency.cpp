@@ -34,6 +34,7 @@
 #include <cstdio>
 #include <deque>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <mutex>
 #include <string>
@@ -1169,7 +1170,7 @@ TEST(TransportRoaming, RelayNodeSeesOnlyCiphertext) {
 #include <LemonadeNexusSDK/BoringtunMesh.hpp>
 #include <LemonadeNexusSDK/LemonadeNexusClient.hpp>
 
-// The client's real mesh plane (BoringtunMesh) with wss_url set: it races,
+// The client's real mesh plane (BoringtunMesh) with wss_urls set: it races,
 // reports the server path in mesh_status(), and keeps the private-API style
 // egress working when UDP to the server is cut.
 TEST(TransportMeshPlane, BoringtunMeshFailsOverToWssAndReportsThePath) {
@@ -1200,7 +1201,7 @@ TEST(TransportMeshPlane, BoringtunMeshFailsOverToWssAndReportsThePath) {
     cfg.server_tunnel_ip = "10.64.0.1";
     cfg.allowed_ips = {"10.64.0.0/10"};
     cfg.keepalive = 25;
-    cfg.wss_url = srv.url("dataplane");
+    cfg.wss_urls = {srv.url("dataplane")};
     ASSERT_TRUE(mesh.start(cfg));
 
     ASSERT_TRUE(wait_for([&] { return mesh.mesh_status().server_path == "direct"; }, 8s))
@@ -1217,7 +1218,7 @@ TEST(TransportMeshPlane, BoringtunMeshFailsOverToWssAndReportsThePath) {
     // A plane without a WSS route reports no server path.
     lnsdk::BoringtunMesh plain;
     auto plain_cfg = cfg;
-    plain_cfg.wss_url.clear();
+    plain_cfg.wss_urls.clear();
     const auto plain_keys = lnsdk::BoringtunMesh::generate_keypair();
     plain_cfg.private_key = plain_keys.first;
     plain_cfg.public_key = plain_keys.second;
@@ -1226,4 +1227,191 @@ TEST(TransportMeshPlane, BoringtunMeshFailsOverToWssAndReportsThePath) {
     plain.stop();
     mesh.stop();
     lnsdk::set_ca_bundle_path("");
+}
+
+// ===========================================================================
+// Bridge abuse limits
+// ===========================================================================
+
+namespace {
+
+/// A plain-HTTP listener with the bridge, for tests that speak raw bytes.
+struct PlainBridge {
+    TransportBridge bridge;
+    httplib::Server server;
+    int port{0};
+    std::thread thread;
+    PlainBridge(uint16_t target, TransportBridge::Limits limits) : bridge(limits) {
+        bridge.add_target("echo", target);
+        bridge.register_routes(server);
+        port = server.bind_to_any_port("127.0.0.1");
+        thread = std::thread([this] { server.listen_after_bind(); });
+        server.wait_until_ready();
+    }
+    ~PlainBridge() {
+        bridge.stop();
+        server.stop();
+        thread.join();
+    }
+    std::string url() const {
+        return "ws://127.0.0.1:" + std::to_string(port) + nexus::network::kTransportBridgePathPrefix + "echo";
+    }
+};
+
+int raw_connect(int port) {
+    int s = ::socket(AF_INET, SOCK_STREAM, 0);
+    auto a = loopback(static_cast<uint16_t>(port));
+    if (::connect(s, reinterpret_cast<sockaddr*>(&a), sizeof a) != 0) {
+        ::close(s);
+        return -1;
+    }
+    timeval tv{5, 0};
+    ::setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+    return s;
+}
+
+/// Read until the peer closes; true when it closed within the timeout.
+bool peer_closes(int s) {
+    char buf[4096];
+    for (;;) {
+        const auto n = ::recv(s, buf, sizeof buf, 0);
+        if (n == 0) return true;
+        if (n < 0) return false;  // timeout
+    }
+}
+
+}  // namespace
+
+TEST(BridgeAbuse, ConnectionsPerAddressAreLimited) {
+    UdpEcho echo;
+    TransportBridge::Limits limits;
+    limits.max_per_ip = 2;
+    PlainBridge pb(echo.port(), limits);
+    WssTunnel a, b, c;
+    WssTunnel::Options o;
+    o.url = pb.url();
+    ASSERT_TRUE(a.open(o));
+    ASSERT_TRUE(b.open(o));
+    ASSERT_TRUE(wait_for([&] { return pb.bridge.active_connections() == 2; }, 5s));
+    ASSERT_TRUE(c.open(o));
+    EXPECT_TRUE(wait_for([&] { return c.state() == WssTunnel::State::Failed; }, 5s));
+    EXPECT_EQ(pb.bridge.counters().refused_per_ip, 1u);
+    // The slot comes back when a connection ends.
+    a.close();
+    ASSERT_TRUE(wait_for([&] { return pb.bridge.active_connections() == 1; }, 5s));
+    WssTunnel d;
+    ASSERT_TRUE(d.open(o));
+    EXPECT_TRUE(wait_for([&] { return d.state() == WssTunnel::State::Open; }, 5s));
+}
+
+TEST(BridgeAbuse, AMessageLargerThanADatagramEndsTheConnection) {
+    UdpEcho echo;
+    PlainBridge pb(echo.port(), {});
+    httplib::ws::WebSocketClient ws(pb.url());
+    ASSERT_TRUE(ws.connect());
+    const std::string big(70000, 'x');
+    ws.send(big.data(), big.size());
+    std::string msg;
+    ws.set_read_timeout(3s);
+    EXPECT_EQ(ws.read(msg), httplib::ws::ReadResult::Fail);
+    EXPECT_EQ(echo.count(), 0);
+    EXPECT_TRUE(wait_for([&] { return pb.bridge.active_connections() == 0; }, 3s));
+}
+
+TEST(BridgeAbuse, ASilentClientIsDroppedOnTheIdleTimer) {
+    UdpEcho echo;
+    TransportBridge::Limits limits;
+    limits.idle_timeout = std::chrono::seconds(2);
+    PlainBridge pb(echo.port(), limits);
+    httplib::ws::WebSocketClient ws(pb.url());
+    ws.set_websocket_ping_interval(0);
+    ASSERT_TRUE(ws.connect());
+    ASSERT_TRUE(wait_for([&] { return pb.bridge.active_connections() == 1; }, 2s));
+    const auto t0 = Clock::now();
+    EXPECT_TRUE(wait_for([&] { return pb.bridge.active_connections() == 0; }, 6s));
+    EXPECT_GE(Clock::now() - t0, 1500ms);
+    EXPECT_EQ(pb.bridge.counters().closed_idle, 1u);
+}
+
+TEST(BridgeAbuse, GarbageAfterTheUpgradeIsDroppedAndTheServerKeepsServing) {
+    UdpEcho echo;
+    PlainBridge pb(echo.port(), {});
+    for (int round = 0; round < 3; ++round) {
+        const int s = raw_connect(pb.port);
+        ASSERT_GE(s, 0);
+        const std::string upgrade =
+            std::string("GET ") + nexus::network::kTransportBridgePathPrefix +
+            "echo HTTP/1.1\r\nHost: 127.0.0.1\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n"
+            "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n";
+        ASSERT_GT(::send(s, upgrade.data(), upgrade.size(), MSG_NOSIGNAL), 0);
+        // Unmasked frames with nonsense opcodes and lengths, then noise.
+        std::string garbage = "\x8f\xff\xff\xff\xff\xff\xff\xff\xff\xff";
+        for (int i = 0; i < 4096; ++i) garbage.push_back(static_cast<char>((i * 131 + round) & 0xFF));
+        (void)::send(s, garbage.data(), garbage.size(), MSG_NOSIGNAL);
+        EXPECT_TRUE(peer_closes(s)) << "round " << round;
+        ::close(s);
+    }
+    EXPECT_TRUE(wait_for([&] { return pb.bridge.active_connections() == 0; }, 3s));
+    EXPECT_EQ(echo.count(), 0);
+    WssTunnel t;
+    WssTunnel::Options o;
+    o.url = pb.url();
+    ASSERT_TRUE(t.open(o));
+    EXPECT_TRUE(wait_for([&] { return t.state() == WssTunnel::State::Open; }, 5s));
+}
+
+// ===========================================================================
+// Several WSS routes: failover between them
+// ===========================================================================
+
+TEST(TransportWssList, TheNextUrlIsUsedWhenTheFirstIsDead) {
+    ASSERT_GE(sodium_init(), 0);
+    CaptivePortal portal;
+    MeshPair mesh([](httplib::Server& api) {
+        api.Get("/ping", [](const httplib::Request&, httplib::Response& res) {
+            res.set_content("pong", "text/plain");
+        });
+    });
+    mesh.shim->set_blocked(true);
+    BridgeServer srv({{"dataplane", mesh.server_dp.bound_port()}});
+    ASSERT_TRUE(srv.ok());
+    auto o = mesh.mux_options(srv.tunnel_options("dataplane"));
+    o.wss_urls = {"wss://localhost:" + std::to_string(portal.port()) + "/api/transport/ws/dataplane",
+                  srv.url("dataplane")};
+    TransportMux mux(mesh.client_dp, o);
+    mesh.mux.store(&mux);
+    ASSERT_EQ(mux.establish(), TransportPath::Wss);
+    EXPECT_EQ(mux.stats().wss_url, srv.url("dataplane"));
+    EXPECT_GE(portal.accepted(), 1);
+    EXPECT_EQ(get_once(mesh.egress(), "/ping"), "pong");
+}
+
+TEST(TransportWssList, ARouteThatDiesFailsOverToTheNextOne) {
+    ASSERT_GE(sodium_init(), 0);
+    MeshPair mesh([](httplib::Server& api) {
+        api.Get("/ping", [](const httplib::Request&, httplib::Response& res) {
+            res.set_content("pong", "text/plain");
+        });
+    });
+    mesh.shim->set_blocked(true);
+    auto first = std::make_unique<BridgeServer>(
+        std::vector<std::pair<std::string, uint16_t>>{{"dataplane", mesh.server_dp.bound_port()}});
+    ASSERT_TRUE(first->ok());
+    // The second route is another listener of the same bridge (plain
+    // WebSocket here, so one CA file still verifies the first).
+    PlainBridge second(mesh.server_dp.bound_port(), {});
+    auto o = mesh.mux_options(first->tunnel_options("dataplane"));
+    o.wss_urls = {first->url("dataplane"), second.url()};
+    o.timing.probe_interval = 100ms;
+    TransportMux mux(mesh.client_dp, o);
+    mesh.mux.store(&mux);
+    ASSERT_EQ(mux.establish(), TransportPath::Wss);
+    mux.start();
+    ASSERT_EQ(mux.stats().wss_url, o.wss_urls[0]);
+    first.reset();  // the first route goes away mid-session
+    EXPECT_TRUE(wait_for(
+        [&] { return mux.path() == TransportPath::Wss && mux.stats().wss_url == o.wss_urls[1]; }, 10s))
+        << mux.stats().wss_url;
+    EXPECT_EQ(get_once(mesh.egress(), "/ping"), "pong");
+    mux.stop();
 }

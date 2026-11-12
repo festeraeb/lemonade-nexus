@@ -192,7 +192,7 @@ bool BoringtunMesh::start(const BoringtunConfig& config) {
             live.server_tunnel_ip == config.server_tunnel_ip &&
             live.server_public_key == config.server_public_key &&
             live.server_endpoint == config.server_endpoint &&
-            live.wss_url == config.wss_url) {
+            live.wss_urls == config.wss_urls) {
             return true;
         }
         // A re-join issues a fresh mesh IP/keys. Keeping the old plane would
@@ -206,7 +206,7 @@ bool BoringtunMesh::start(const BoringtunConfig& config) {
     dpcfg.private_key_b64 = config.private_key;
     dpcfg.public_key_b64  = config.public_key;
     dpcfg.listen_port     = config.listen_port;  // 0 = random
-    if (!config.wss_url.empty()) {
+    if (!config.wss_urls.empty()) {
         // Paths swap under a live stream: size the netstack for the smallest
         // rung (the 9103 relay's Data header on a 1500-byte link), so no
         // move black-holes a packet that fit the old path.
@@ -499,19 +499,20 @@ void BoringtunMesh::start_mux() {
     std::lock_guard lock(impl_->mux_mtx);
     if (impl_->mux) return;
     const auto& cfg = impl_->started_cfg;
-    if (cfg.wss_url.empty() || impl_->server_pubkey.empty() || cfg.server_endpoint.empty()) return;
+    if (cfg.wss_urls.empty() || impl_->server_pubkey.empty() || cfg.server_endpoint.empty()) return;
     TransportMux::Options opts;
     opts.peer_pubkey = impl_->server_pubkey;
     opts.udp_endpoint = cfg.server_endpoint;
-    opts.wss.url = cfg.wss_url;
+    opts.wss_urls = cfg.wss_urls;
     opts.own_ip = addr_part(cfg.tunnel_ip);
     opts.peer_ip = cfg.server_tunnel_ip;
     auto mux = std::make_unique<TransportMux>(impl_->dp, std::move(opts));
     impl_->mux_ptr.store(mux.get());
     impl_->mux = std::move(mux);
     impl_->mux->start();
-    spdlog::info("[BoringtunMesh] server path: UDP {} with WSS fallback {}", cfg.server_endpoint,
-                 cfg.wss_url);
+    spdlog::info("[BoringtunMesh] server path: UDP {} with WSS fallback {} ({} route{})",
+                 cfg.server_endpoint, cfg.wss_urls.front(), cfg.wss_urls.size(),
+                 cfg.wss_urls.size() == 1 ? "" : "s");
 }
 
 StatusResult BoringtunMesh::sync_peers(const std::vector<MeshPeer>& desired) {

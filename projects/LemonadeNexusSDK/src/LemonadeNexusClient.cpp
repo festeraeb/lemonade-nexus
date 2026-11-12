@@ -3396,11 +3396,25 @@ Result<JoinResult> LemonadeNexusClient::join_network(const std::string& username
         // A server with the transport bridge names its route; the mesh then
         // keeps a TLS WebSocket path to the server for networks that block
         // UDP. It is the same host and port as the public API.
+        // `mesh_wss_urls` adds other routes to the same bridge (for example
+        // through a tunnel provider), tried in order after the first.
         if (const auto wss_path = resp->value("mesh_wss_path", std::string{});
             !wss_path.empty() && wss_path.front() == '/') {
             const auto target = impl_->current_target();
             if (!target.host.empty() && target.port != 0) {
-                bt.wss_url = "wss://" + target.host + ":" + std::to_string(target.port) + wss_path;
+                bt.wss_urls.push_back("wss://" + target.host + ":" + std::to_string(target.port) +
+                                      wss_path);
+            }
+        }
+        if (const auto extra = resp->find("mesh_wss_urls"); extra != resp->end() && extra->is_array()) {
+            for (const auto& url : *extra) {
+                if (!url.is_string()) continue;
+                const auto text = url.get<std::string>();
+                if (text.rfind("wss://", 0) != 0 || text.size() > 512) continue;
+                if (std::find(bt.wss_urls.begin(), bt.wss_urls.end(), text) == bt.wss_urls.end() &&
+                    bt.wss_urls.size() < 8) {
+                    bt.wss_urls.push_back(text);
+                }
             }
         }
 

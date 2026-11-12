@@ -220,7 +220,7 @@ public:
     StatusResult remove_peer(const std::string& pubkey);
 
     /// The path to the session server: "direct", "wss", or "none" while the
-    /// race runs; empty when the config names no WSS route (wss_url).
+    /// race runs; empty when the config names no WSS route (wss_urls).
     /// Thread-safe.
     [[nodiscard]] std::string server_path() const;
 
