@@ -46,6 +46,7 @@ void MuxPolicy::install(TransportPath path, Clock::time_point now) {
 void MuxPolicy::on_reply(TransportPath path, Clock::time_point now) {
     if (path == TransportPath::Udp) last_reply_udp_ = now;
     if (path == TransportPath::Wss) last_reply_wss_ = now;
+    if (path != TransportPath::None) dead_streak_ = 0;
 }
 
 MuxPolicy::Action MuxPolicy::decide(Clock::time_point now, bool wss_ready) {
@@ -78,7 +79,9 @@ MuxPolicy::Action MuxPolicy::decide(Clock::time_point now, bool wss_ready) {
     const auto& last_reply = active_ == TransportPath::Udp ? last_reply_udp_ : last_reply_wss_;
     // A rung gets dead_after from the move to it before it can be dead.
     const auto alive_since = std::max(last_reply, last_move_);
-    const bool dead = now - alive_since >= timing_.dead_after();
+    // With both rungs silent, each further move waits longer.
+    const uint32_t factor = dead_streak_ >= 2 ? std::min(1u << std::min(dead_streak_ - 1, 4u), 16u) : 1u;
+    const bool dead = now - alive_since >= timing_.dead_after() * static_cast<int>(factor);
 
     if (active_ == TransportPath::Wss && !wss_ready) {
         active_ = TransportPath::Udp;
@@ -87,12 +90,14 @@ MuxPolicy::Action MuxPolicy::decide(Clock::time_point now, bool wss_ready) {
     }
     if (dead) {
         if (active_ == TransportPath::Udp && wss_ready) {
+            ++dead_streak_;
             active_ = TransportPath::Wss;
             last_move_ = now;
             next_trial_ = now + timing_.hold_down;
             return Action::MoveToWss;
         }
         if (active_ == TransportPath::Wss) {
+            ++dead_streak_;
             active_ = TransportPath::Udp;
             last_move_ = now;
             return Action::MoveToUdp;
@@ -329,6 +334,15 @@ struct TransportMux::Impl {
             spdlog::info("[TransportMux] path -> {}{}", transport_path_name(to),
                          failover ? " (failover)" : "");
         };
+        if ((action == A::MoveToWss || action == A::MoveToUdp) && policy.dead_streak() >= 2) {
+            // Neither rung answers: the peer may have lost the session (a
+            // restart). A fresh handshake on every rung recovers at once
+            // instead of after the session's own rekey timers.
+            std::vector<std::string> targets{opts.udp_endpoint};
+            if (!wss_ep.empty()) targets.push_back(wss_ep);
+            (void)dp.probe_endpoints(opts.peer_pubkey, targets);
+            ++stats.rehandshakes;
+        }
         switch (action) {
             case A::MoveToWss: move(TransportPath::Wss, true); break;
             case A::MoveToUdp: move(TransportPath::Udp, true); break;
@@ -505,6 +519,8 @@ bool TransportMux::observe_inbound(std::span<const uint8_t> p) {
 TransportPath TransportMux::path() const {
     const auto endpoint = impl_->dp_endpoint();
     std::lock_guard lock(impl_->mtx);
+    // Before a handshake proved a rung, the configured endpoint proves nothing.
+    if (impl_->policy.active() == TransportPath::None) return TransportPath::None;
     return impl_->classify_locked(endpoint);
 }
 
@@ -512,7 +528,8 @@ TransportMux::Stats TransportMux::stats() const {
     const auto endpoint = impl_->dp_endpoint();
     std::lock_guard lock(impl_->mtx);
     Stats s = impl_->stats;
-    s.path = impl_->classify_locked(endpoint);
+    s.path = impl_->policy.active() == TransportPath::None ? TransportPath::None
+                                                           : impl_->classify_locked(endpoint);
     return s;
 }
 

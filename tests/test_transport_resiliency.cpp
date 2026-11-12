@@ -1495,3 +1495,31 @@ TEST(TransportMtu, AFullSizePacketCrossesTheDirectAndWssRungs) {
     mesh.stop();
     lnsdk::set_ca_bundle_path("");
 }
+
+// Both rungs silent (for example the server restarted and lost the
+// session): the moves between them slow down instead of flapping every
+// dead_after, and a reply ends the backoff.
+TEST(MuxPolicyBackoff, BothRungsDeadBacksOffTheMoves) {
+    MuxPolicy::Timing t;
+    t.probe_interval = 100ms;
+    t.miss_limit = 4;
+    t.hold_down = 10s;
+    MuxPolicy p(t);
+    const auto t0 = Clock::now();
+    p.install(TransportPath::Udp, t0);
+    std::vector<int64_t> moves;
+    for (int ms = 0; ms <= 20000; ms += 10) {
+        const auto now = t0 + std::chrono::milliseconds(ms);
+        const auto a = p.decide(now, true);
+        if (a == MuxPolicy::Action::MoveToWss || a == MuxPolicy::Action::MoveToUdp) moves.push_back(ms);
+    }
+    ASSERT_GE(moves.size(), 4u);
+    // The first two moves come at the normal dead time; later gaps grow.
+    EXPECT_LE(moves[1] - moves[0], 450);
+    EXPECT_GT(moves[3] - moves[2], moves[1] - moves[0]);
+    EXPECT_LT(moves.size(), 20u) << "no flapping every 400 ms for 20 s";
+    EXPECT_GE(p.dead_streak(), 3u);
+    // A reply on the active rung ends the streak.
+    p.on_reply(p.active(), t0 + 20001ms);
+    EXPECT_EQ(p.dead_streak(), 0u);
+}

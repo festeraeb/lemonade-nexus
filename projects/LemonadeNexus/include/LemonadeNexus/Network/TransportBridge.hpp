@@ -92,8 +92,9 @@ public:
     /// before register_routes.
     bool add_target(const std::string& name, uint16_t udp_port);
 
-    /// Register one WebSocket route per target on `server`. Re-runnable
-    /// when the listener object is replaced (a plain-to-TLS upgrade).
+    /// Register one WebSocket route per target on `server`, and turn on
+    /// TCP_NODELAY for the listener (see the .cpp). Re-runnable when the
+    /// listener object is replaced (a plain-to-TLS upgrade).
     void register_routes(httplib::Server& server);
 
     /// Refuse new connections and close the open ones within about one

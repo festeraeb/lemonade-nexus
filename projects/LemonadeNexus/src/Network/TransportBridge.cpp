@@ -86,6 +86,12 @@ bool TransportBridge::add_target(const std::string& name, uint16_t udp_port) {
 }
 
 void TransportBridge::register_routes(httplib::Server& server) {
+    // cpp-httplib writes a WebSocket frame's header, length, and payload as
+    // separate writes. With Nagle on, the payload waits for the ACK of the
+    // header, and the peer's delayed ACK adds about 40 ms to every datagram
+    // the bridge sends (measured in the namespace lab: 41 ms RTT on a link
+    // with 0.1 ms RTT). The setting applies to the whole listener.
+    server.set_tcp_nodelay(true);
     for (const auto& [name, port] : targets_) {
         server.WebSocket(kTransportBridgePathPrefix + name,
                          [this, port = port](const httplib::Request& req, httplib::ws::WebSocket& ws) {

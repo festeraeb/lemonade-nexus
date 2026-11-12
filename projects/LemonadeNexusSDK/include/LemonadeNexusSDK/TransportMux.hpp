@@ -112,6 +112,11 @@ public:
     Action decide(Clock::time_point now, bool wss_ready);
 
     [[nodiscard]] TransportPath active() const { return active_; }
+    /// Moves away from a dead rung in a row with no reply in between. From
+    /// 2 on, both rungs are silent (the peer likely lost the session): each
+    /// further move waits twice as long (up to 16 x dead_after), and the mux
+    /// starts a new handshake on both rungs.
+    [[nodiscard]] uint32_t dead_streak() const { return dead_streak_; }
     [[nodiscard]] bool          trying() const { return trial_; }
     [[nodiscard]] Clock::time_point last_move() const { return last_move_; }
     [[nodiscard]] const Timing& timing() const { return timing_; }
@@ -126,6 +131,7 @@ private:
     Clock::time_point trial_started_{};
     Clock::time_point next_trial_{};
     std::chrono::milliseconds backoff_{0};
+    uint32_t          dead_streak_{0};
 };
 
 /// Bytes the rungs add around one inner IP packet.
@@ -178,6 +184,7 @@ public:
         uint64_t      moves{0};            ///< every repoint after establishment
         uint64_t      failovers{0};        ///< moves away from a dead rung
         uint64_t      trials{0};
+        uint64_t      rehandshakes{0};     ///< handshakes started because both rungs were silent
         uint64_t      probes_sent{0};
         uint64_t      replies{0};
         /// The newest failover: from the last reply on the dead rung to the

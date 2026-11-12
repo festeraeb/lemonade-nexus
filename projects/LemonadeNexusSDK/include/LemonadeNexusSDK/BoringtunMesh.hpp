@@ -83,6 +83,16 @@ public:
     /// not called again. Thread-safe.
     void set_ingress_source_handler(IngressSourceHandler handler);
 
+    /// Session facts of the server peer, for diagnostics and soak tests.
+    struct SessionInfo {
+        std::string endpoint;      ///< where the dataplane sends now
+        uint32_t    tunnel_index{0};
+        uint32_t    rx_session{0}; ///< receiver index of the newest transport packet
+        uint64_t    handshakes{0}; ///< completed since the plane started
+    };
+    /// nullopt when inactive or there is no server peer. Thread-safe.
+    [[nodiscard]] std::optional<SessionInfo> server_session() const;
+
     /// The netstack MTU the plane started with (0 when inactive): the
     /// largest inner IP packet every enabled path carries in one link packet.
     [[nodiscard]] uint32_t mtu() const;

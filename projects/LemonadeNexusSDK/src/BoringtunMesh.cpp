@@ -359,6 +359,13 @@ void BoringtunMesh::stop() {
     spdlog::info("[BoringtunMesh] dataplane down");
 }
 
+std::optional<BoringtunMesh::SessionInfo> BoringtunMesh::server_session() const {
+    if (!impl_->active.load() || impl_->server_pubkey.empty()) return std::nullopt;
+    const auto info = impl_->dp.peer_path_info(impl_->server_pubkey);
+    if (!info) return std::nullopt;
+    return SessionInfo{info->endpoint, info->tunnel_index, info->rx_session, info->handshakes};
+}
+
 uint32_t BoringtunMesh::mtu() const { return impl_->active.load() ? impl_->mtu.load() : 0; }
 
 bool BoringtunMesh::is_active() const {
