@@ -62,6 +62,15 @@ public:
             peers = std::move(it->second.peers);
             held_.erase(it);
         }
+        if (peers.empty()) return;
+        if (defer_) {
+            // The answer has been handed to the socket, not delivered: it may
+            // still sit in the netstack on its way through this very tunnel.
+            defer_([remove = remove_, peers = std::move(peers)] {
+                for (const auto& key : peers) remove(key);
+            });
+            return;
+        }
         for (const auto& key : peers) remove_(key);
     }
 

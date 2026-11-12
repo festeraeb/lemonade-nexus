@@ -84,13 +84,15 @@ bool loop_was_suspended(std::chrono::milliseconds wall_elapsed, std::chrono::mil
 }
 
 std::string reported_server_path(const std::string& mux_path, bool running, bool tunnel_up) {
-    (void)running; (void)tunnel_up;
-    return mux_path;  // stub
+    if (!mux_path.empty()) return mux_path;
+    if (!running) return {};
+    return tunnel_up ? "direct" : "none";
 }
 
 bool heartbeat_means_node_gone(int http_status, const std::string& error) {
-    (void)http_status; (void)error;
-    return false;  // stub
+    // The heartbeat route answers 404 "node not found" when the tree has no
+    // node for this device (MeshApiHandler); any other 404 is a route problem.
+    return http_status == 404 && error == "node not found";
 }
 
 bool tunnel_alive(int64_t server_seen_unix, int64_t now_unix,
@@ -204,7 +206,7 @@ MeshTunnelStatus MeshOrchestrator::status() const {
     auto status = last_status_;
     status.tunnel_up = running_.load() && seen &&
                        tunnel_alive(*seen, now_unix, std::chrono::steady_clock::now() - started_at_);
-    status.server_path = mesh_.server_path();
+    status.server_path = reported_server_path(mesh_.server_path(), running_.load(), status.tunnel_up);
     return status;
 }
 
@@ -696,8 +698,16 @@ bool MeshOrchestrator::do_stun_refresh() {
         spdlog::debug("[MeshOrchestrator] STUN server {} does not resolve", server);
         return false;
     }
+    // The session server's STUN port, as its listing names it.
+    uint16_t stun_port = kStunPort;
+    if (const auto session = client_.session_server(); !session.empty()) {
+        const auto host = session.substr(0, session.rfind(':'));
+        for (const auto& s : client_.tier1_membership().servers) {
+            if (s.host == host && s.stun_port != 0) stun_port = s.stun_port;
+        }
+    }
     const auto reflexive =
-        mesh_.query_reflexive(*stun_ip + ":" + std::to_string(kStunPort), kStunTimeout);
+        mesh_.query_reflexive(*stun_ip + ":" + std::to_string(stun_port), kStunTimeout);
     if (!reflexive) {
         spdlog::debug("[MeshOrchestrator] no STUN answer from {}", *stun_ip);
         return false;
@@ -792,7 +802,8 @@ std::vector<RelayCandidate> MeshOrchestrator::relay_candidates() {
         if (!server.host.empty() && server.port != 0) {
             wss = "wss://" + server.host + ":" + std::to_string(server.port) + "/api/transport/ws/relay";
         }
-        out.push_back({server.node_id, server.host, kRelayPort, std::move(wss)});
+        out.push_back({server.node_id, server.host,
+                       server.relay_port != 0 ? server.relay_port : kRelayPort, std::move(wss)});
     }
     // Relays the session's server lists. Tier 2 relays appear here.
     auto listed = client_.list_relays();

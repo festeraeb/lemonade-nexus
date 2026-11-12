@@ -1,4 +1,9 @@
 #include <LemonadeNexus/Api/TreeApiHandler.hpp>
+
+#include <chrono>
+#include <filesystem>
+#include <fstream>
+#include <thread>
 #include <LemonadeNexus/Network/TransportBridge.hpp>
 #include <algorithm>
 #include <cctype>
@@ -735,14 +740,77 @@ nlohmann::json tree_memberships(const tree::PermissionTreeService& tree,
 // per-server cleanup of a removed node runs everywhere, once.
 TreeApiHandler::TreeApiHandler(ApiContext& ctx)
     : ctx_(ctx), pending_joins_(std::make_shared<PendingJoins>()),
-      peer_holds_([this](const std::string& peer_key) {
-          if (ctx_.boringtun && ctx_.boringtun->remove_peer(peer_key)) {
-              spdlog::info("[TreeApi] removed mesh peer {}… of a deleted node",
-                           peer_key.substr(0, 8));
-          }
-      }) {
+      peer_holds_(
+          [this](const std::string& peer_key) {
+              // A device that joined again since its node was deleted holds
+              // the key again: its new peer must stay.
+              for (const auto& [id, n] : ctx_.tree.nodes_snapshot()) {
+                  if (!n.mesh_pubkey.empty() &&
+                      api::normalize_mesh_pubkey(n.mesh_pubkey) == peer_key) {
+                      spdlog::info("[TreeApi] kept mesh peer {}…: node '{}' holds the key again",
+                                   peer_key.substr(0, 8), id);
+                      return;
+                  }
+              }
+              if (ctx_.boringtun && ctx_.boringtun->remove_peer(peer_key)) {
+                  spdlog::info("[TreeApi] removed mesh peer {}… of a deleted node",
+                               peer_key.substr(0, 8));
+              }
+          },
+          // The answer to a device that removed its own node leaves through
+          // the tunnel the removal closes; give it time to arrive.
+          [alive = std::weak_ptr<int>(alive_)](std::function<void()> work) {
+              std::thread([alive, work = std::move(work)] {
+                  std::this_thread::sleep_for(std::chrono::seconds(3));
+                  if (alive.lock()) work();
+              }).detach();
+          }) {
     ctx_.tree.set_removed_nodes_hook(
         [this](const std::vector<tree::RemovedNode>& removed) { cleanup_removed_nodes(removed); });
+}
+
+void TreeApiHandler::left_load_locked() {
+    if (left_loaded_) return;
+    left_loaded_ = true;
+    const auto path = std::filesystem::path(ctx_.config.data_root) / "security" / "left-devices.json";
+    std::ifstream in(path);
+    if (!in) return;
+    const auto j = nlohmann::json::parse(in, nullptr, false);
+    if (!j.is_array()) return;
+    for (const auto& k : j) {
+        if (k.is_string()) left_devices_.insert(k.get<std::string>());
+    }
+}
+
+void TreeApiHandler::left_save_locked() {
+    if (ctx_.config.data_root.empty()) return;
+    const auto dir = std::filesystem::path(ctx_.config.data_root) / "security";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
+    const auto tmp = dir / "left-devices.json.tmp";
+    {
+        std::ofstream out(tmp, std::ios::trunc);
+        out << nlohmann::json(left_devices_).dump();
+    }
+    std::filesystem::rename(tmp, dir / "left-devices.json", ec);
+}
+
+bool TreeApiHandler::left_contains(const std::string& principal) {
+    std::lock_guard lock(left_mtx_);
+    left_load_locked();
+    return left_devices_.contains(principal);
+}
+
+void TreeApiHandler::left_add(const std::string& principal) {
+    std::lock_guard lock(left_mtx_);
+    left_load_locked();
+    if (left_devices_.insert(principal).second) left_save_locked();
+}
+
+void TreeApiHandler::left_remove(const std::string& principal) {
+    std::lock_guard lock(left_mtx_);
+    left_load_locked();
+    if (left_devices_.erase(principal) > 0) left_save_locked();
 }
 
 TreeApiHandler::~TreeApiHandler() {
@@ -759,6 +827,11 @@ void TreeApiHandler::cascade_node_cleanup(const std::string& node_id,
                                           const std::optional<tree::TreeNode>& doomed,
                                           bool revoke_key) {
     if (!doomed) return;
+    // 0. A device that left on its own (revoke_key false) joins again only
+    //    with an invite: remember its key.
+    if (!revoke_key && doomed->type == tree::NodeType::Endpoint && !doomed->mgmt_pubkey.empty()) {
+        left_add(tree::canonical_principal(doomed->mgmt_pubkey));
+    }
     // 1. Revoke the device's Ed25519 credential so a deleted device
     //    cannot silently auto-re-register (node_id is key-deterministic).
     //    Owner-protection: an owner's key is the mgmt_pubkey of their
@@ -984,6 +1057,22 @@ void TreeApiHandler::do_register_routes(httplib::Server& pub, httplib::Server& p
                 "application root not established — root initialization is unavailable",
                 409);
             return;
+        }
+
+        // A device that left the network on its own stays out until it joins
+        // again with an invite: a sign-in by its key alone would otherwise
+        // create a new device in a new group of its own.
+        {
+            const auto principal = tree::canonical_principal(norm_pubkey);
+            if (!ctx_.tree.get_node(node_id)) {
+                if (link) {
+                    left_remove(principal);
+                } else if (left_contains(principal)) {
+                    error_response(res,
+                        "this device left the network; join again with an invite", 403);
+                    return;
+                }
+            }
         }
 
         // A device that already joined does not move: its link token is an

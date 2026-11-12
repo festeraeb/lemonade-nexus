@@ -183,6 +183,12 @@ public:
     /// Peers used to dial 51940 whatever the config said, so the backbone (and tree
     /// replication over it) never came up between servers on other ports.
     void set_our_udp_port(uint16_t port) { our_udp_port_ = port; }
+    /// Relay and STUN ports, listed by GET /api/servers so clients reach a relay
+    /// that is not on the canonical 9103 / 3478.
+    void set_our_relay_stun_ports(uint16_t relay, uint16_t stun) {
+        our_relay_port_ = relay;
+        our_stun_port_ = stun;
+    }
 
     /// Broadcast a backbone IPAM allocation delta to all peers.
     void broadcast_backbone_ipam_delta(const ipam::BackboneAllocationDelta& delta);
@@ -813,6 +819,8 @@ private:
     std::string                      our_advertised_endpoint_;  // "ip:port" we are reachable at
     uint16_t                         our_http_port_{0};          // 0 = not announced
     uint16_t                         our_udp_port_{0};           // 0 = not announced
+    uint16_t                         our_relay_port_{0};
+    uint16_t                         our_stun_port_{0};
     std::map<std::string, std::string> backbone_peer_endpoints_; // key -> endpoint last given
     uint32_t                         hello_refresh_ticks_{0};
 

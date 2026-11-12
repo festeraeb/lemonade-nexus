@@ -125,6 +125,8 @@ void PublicApiHandler::do_register_routes(httplib::Server& pub,
             // The node identity a Tier 1 endpoint proof is signed with.
             .pubkey    = crypto::to_base64(ctx_.gossip.keypair().public_key),
             .http_port = ctx_.config.http_port,
+            .relay_port = ctx_.config.relay_port,
+            .stun_port  = ctx_.config.stun_port,
             .healthy   = true,
         });
 
@@ -147,6 +149,8 @@ void PublicApiHandler::do_register_routes(httplib::Server& pub,
                 .fqdn      = fqdn,
                 .pubkey    = p.pubkey,
                 .http_port = p.http_port,
+                .relay_port = p.relay_port,
+                .stun_port  = p.stun_port,
                 .last_seen = p.last_seen,
                 .healthy   = true,
             });

@@ -3895,6 +3895,11 @@ MeshTunnelStatus LemonadeNexusClient::mesh_status() const {
         }
     }
     status.needs_rejoin = impl_->rejoin_needed.load(std::memory_order_relaxed);
+    // A node the server no longer knows carries nothing useful over the tunnel.
+    if (status.needs_rejoin) {
+        status.tunnel_up = false;
+        if (!status.server_path.empty()) status.server_path = "none";
+    }
     return status;
 }
 
@@ -4366,7 +4371,13 @@ Result<LemonadeNexusClient::MeshRevisions> LemonadeNexusClient::mesh_heartbeat(
         return {false, {}, status, "heartbeat request failed"};
     }
     if (status != 200) {
-        return {false, {}, status, resp->value("error", "heartbeat failed")};
+        const auto error = resp->value("error", std::string("heartbeat failed"));
+        if (heartbeat_means_node_gone(status, error) &&
+            !impl_->rejoin_needed.exchange(true, std::memory_order_relaxed)) {
+            spdlog::warn("[LemonadeNexusClient] the server no longer knows node {}: join again",
+                         nid);
+        }
+        return {false, {}, status, error};
     }
     // The session's server says it leaves Tier 1 at the next epoch: move
     // the session early. Verified by the move, never taken on its word.

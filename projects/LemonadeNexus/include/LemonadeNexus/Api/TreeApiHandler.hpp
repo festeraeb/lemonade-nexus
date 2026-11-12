@@ -6,6 +6,8 @@
 #include <nlohmann/json.hpp>
 
 #include <memory>
+#include <mutex>
+#include <set>
 #include <optional>
 #include <string>
 #include <vector>
@@ -103,7 +105,21 @@ private:
     std::shared_ptr<PendingJoins> pending_joins_;
     /// Peer removals held for a device that removes its own node over its
     /// tunnel, until its answer has left (see PeerRemovalHold).
+    // Declared before peer_holds_: its deferral holds a weak reference.
+    std::shared_ptr<int> alive_ = std::make_shared<int>(0);
     PeerRemovalHold peer_holds_;
+    // Keys of devices that left on their own (their node was deleted by
+    // their own request). Such a key joins again only with an invite. Every
+    // server that applies the delete records it (the removal hook), and the
+    // set is kept in <data_root>/security/left-devices.json.
+    std::mutex left_mtx_;
+    std::set<std::string> left_devices_;
+    bool left_loaded_ = false;
+    void left_load_locked();
+    void left_save_locked();
+    bool left_contains(const std::string& principal);
+    void left_add(const std::string& principal);
+    void left_remove(const std::string& principal);
 };
 
 } // namespace nexus::api

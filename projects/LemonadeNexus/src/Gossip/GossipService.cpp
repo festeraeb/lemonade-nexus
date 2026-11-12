@@ -356,6 +356,8 @@ void GossipService::send_startup_server_hello() {
             }
             if (our_http_port_ != 0) hello["http_port"] = our_http_port_;
             if (our_udp_port_ != 0) hello["udp_port"] = our_udp_port_;
+            if (our_relay_port_ != 0) hello["relay_port"] = our_relay_port_;
+            if (our_stun_port_ != 0) hello["stun_port"] = our_stun_port_;
         }
         auto payload_str = hello.dump();
         std::vector<uint8_t> payload_bytes(payload_str.begin(), payload_str.end());
@@ -1837,6 +1839,8 @@ void GossipService::on_gossip_tick() {
                     hello["advertised_endpoint"] = our_advertised_endpoint_;
                 if (our_http_port_ != 0) hello["http_port"] = our_http_port_;
                 if (our_udp_port_ != 0) hello["udp_port"] = our_udp_port_;
+                if (our_relay_port_ != 0) hello["relay_port"] = our_relay_port_;
+                if (our_stun_port_ != 0) hello["stun_port"] = our_stun_port_;
             }
             auto hello_str = hello.dump();
             std::vector<uint8_t> hello_bytes(hello_str.begin(), hello_str.end());
@@ -2071,6 +2075,8 @@ void to_json(nlohmann::json& j, const GossipPeer& p) {
         {"advertised_endpoint", p.advertised_endpoint},
         {"http_port",           p.http_port},
         {"udp_port",            p.udp_port},
+        {"relay_port",          p.relay_port},
+        {"stun_port",           p.stun_port},
         {"last_seen",           p.last_seen},
         {"reputation",          p.reputation},
         {"certificate_json",    p.certificate_json},
@@ -2085,6 +2091,8 @@ void from_json(const nlohmann::json& j, GossipPeer& p) {
     p.advertised_endpoint = j.value("advertised_endpoint", "");
     p.http_port           = j.value("http_port", uint16_t{9100});
     p.udp_port            = j.value("udp_port", uint16_t{0});
+    p.relay_port          = j.value("relay_port", uint16_t{0});
+    p.stun_port           = j.value("stun_port", uint16_t{0});
     p.last_seen           = j.value("last_seen", uint64_t{0});
     p.reputation          = j.value("reputation", 1.0f);
     p.certificate_json    = j.value("certificate_json", "");
@@ -2674,6 +2682,14 @@ void GossipService::handle_server_hello(const asio::ip::udp::endpoint& sender,
                 up_it->get<uint64_t>() > 0 && up_it->get<uint64_t>() <= 0xFFFF) {
                 announced_udp_port = static_cast<uint16_t>(up_it->get<uint64_t>());
             }
+            const auto port_field = [&j](const char* key) -> uint16_t {
+                const auto it = j.find(key);
+                if (it == j.end() || !it->is_number_unsigned()) return 0;
+                const auto v = it->get<uint64_t>();
+                return v > 0 && v <= 0xFFFF ? static_cast<uint16_t>(v) : uint16_t{0};
+            };
+            const uint16_t announced_relay_port = port_field("relay_port");
+            const uint16_t announced_stun_port = port_field("stun_port");
             const auto advertised = j.value("advertised_endpoint", std::string{});
             // Cross-check the advertised endpoint against the UDP source we
             // actually observed. Only a match is "source-confirmed" and safe to
@@ -2684,6 +2700,8 @@ void GossipService::handle_server_hello(const asio::ip::udp::endpoint& sender,
                 it->certificate_json = j.dump();
                 it->region = j.value("region", "");
                 if (announced_http_port != 0) it->http_port = announced_http_port;
+                if (announced_relay_port != 0) it->relay_port = announced_relay_port;
+                if (announced_stun_port != 0) it->stun_port = announced_stun_port;
                 if (announced_udp_port != 0 && it->udp_port != announced_udp_port) {
                     it->udp_port = announced_udp_port;
                     if (!it->backbone_ip.empty() && !it->mesh_pubkey.empty()) backbone_refresh = *it;
@@ -2714,6 +2732,8 @@ void GossipService::handle_server_hello(const asio::ip::udp::endpoint& sender,
                 peer.http_port          = announced_http_port != 0 ? announced_http_port
                                                                    : uint16_t{9100};
                 peer.udp_port           = announced_udp_port;
+                peer.relay_port         = announced_relay_port;
+                peer.stun_port          = announced_stun_port;
                 peer.last_seen          = static_cast<uint64_t>(
                     chrono::system_clock::to_time_t(chrono::system_clock::now()));
                 peer.reputation         = 1.0f;

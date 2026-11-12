@@ -227,7 +227,8 @@ int main(int argc, char* argv[]) {
     nexus::gossip::GossipService gossip{coordinator.io_context(), gossip_port, storage, crypto};
 
     gossip.set_our_http_port(http_port);  // announced in ServerHello (listed by GET /api/servers)
-    gossip.set_our_udp_port(udp_port);    // announced in ServerHello (backbone tunnel endpoint)
+    gossip.set_our_udp_port(udp_port);
+    gossip.set_our_relay_stun_ports(config.relay_port, config.stun_port);    // announced in ServerHello (backbone tunnel endpoint)
     gossip.set_identity(gossip_identity->keypair);
     if (!config.root_pubkey.empty()) {
         auto root_pk_bytes = nexus::crypto::from_hex(config.root_pubkey);

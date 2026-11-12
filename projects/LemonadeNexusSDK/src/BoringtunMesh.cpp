@@ -843,7 +843,13 @@ MeshTunnelStatus BoringtunMesh::mesh_status() const {
     }
 
     for (const auto& peer : impl_->dp.snapshot_peers()) {
-        if (peer.public_key == impl_->server_pubkey) continue;
+        if (peer.public_key == impl_->server_pubkey) {
+            // The session server's tunnel carries the heartbeats and the
+            // private API: count it in the totals, not as a mesh peer.
+            ms.total_rx_bytes += peer.rx_bytes;
+            ms.total_tx_bytes += peer.tx_bytes;
+            continue;
+        }
         MeshPeer mp;
         mp.mesh_pubkey   = peer.public_key;
         mp.tunnel_ip     = addr_part(peer.allowed_ips);  // first cidr's address

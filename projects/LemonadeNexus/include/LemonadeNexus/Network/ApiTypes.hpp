@@ -341,6 +341,8 @@ inline void to_json(nlohmann::json& j, const ServerEntry& r) {
     if (!r.fqdn.empty())   j["fqdn"]      = r.fqdn;
     if (!r.pubkey.empty()) j["pubkey"]    = r.pubkey;
     if (r.last_seen > 0)  j["last_seen"] = r.last_seen;
+    if (r.relay_port > 0) j["relay_port"] = r.relay_port;
+    if (r.stun_port > 0)  j["stun_port"]  = r.stun_port;
 }
 
 inline void from_json(const nlohmann::json& j, ServerEntry& r) {
@@ -348,6 +350,8 @@ inline void from_json(const nlohmann::json& j, ServerEntry& r) {
     r.fqdn      = j.value("fqdn", "");
     r.pubkey    = j.value("pubkey", "");
     r.http_port = j.value("http_port", uint16_t{0});
+    r.relay_port = j.value("relay_port", uint16_t{0});
+    r.stun_port  = j.value("stun_port", uint16_t{0});
     r.last_seen = j.value("last_seen", uint64_t{0});
     r.healthy   = j.value("healthy", true);
 }

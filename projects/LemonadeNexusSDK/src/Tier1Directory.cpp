@@ -537,6 +537,8 @@ Result<Tier1Membership> Tier1Directory::refresh_verified(
     struct Listed {
         ServerEndpoint endpoint;
         std::optional<sec::NodeId> node;
+        uint16_t relay_port = 0;
+        uint16_t stun_port = 0;
     };
     std::map<std::string, std::vector<Listed>> listings;
     const auto listed_by = [&](const ServerEndpoint& source) -> const std::vector<Listed>& {
@@ -565,7 +567,14 @@ Result<Tier1Membership> Tier1Directory::refresh_verified(
                 std::memcpy(node.bytes.data(), bytes->data(), node.bytes.size());
                 listed = node;
             }
-            out.push_back(Listed{ServerEndpoint{host, port, true}, listed});
+            const auto port_of = [&entry](const char* key) -> uint16_t {
+                const auto it = entry.find(key);
+                if (it == entry.end() || !it->is_number_unsigned()) return 0;
+                const auto v = it->get<uint64_t>();
+                return v > 0 && v <= 0xFFFF ? static_cast<uint16_t>(v) : uint16_t{0};
+            };
+            out.push_back(Listed{ServerEndpoint{host, port, true}, listed, port_of("relay_port"),
+                                 port_of("stun_port")});
         }
         return out;
     };
@@ -677,23 +686,33 @@ Result<Tier1Membership> Tier1Directory::refresh_verified(
     struct Candidate {
         ServerEndpoint endpoint;
         std::optional<sec::NodeId> listed_node;
+        uint16_t relay_port = 0;
+        uint16_t stun_port = 0;
     };
     std::vector<Candidate> candidates;
     const auto add_candidate = [&candidates](ServerEndpoint endpoint,
-                                             std::optional<sec::NodeId> node) {
+                                             std::optional<sec::NodeId> node,
+                                             uint16_t relay_port = 0, uint16_t stun_port = 0) {
         if (endpoint.host.empty() || endpoint.port == 0) return;
         const auto key = lower(endpoint.host);
-        for (const auto& c : candidates) {
-            if (lower(c.endpoint.host) == key && c.endpoint.port == endpoint.port) return;
+        for (auto& c : candidates) {
+            if (lower(c.endpoint.host) == key && c.endpoint.port == endpoint.port) {
+                // A source seen first as a seed learns its ports from the list.
+                if (relay_port != 0) c.relay_port = relay_port;
+                if (stun_port != 0) c.stun_port = stun_port;
+                if (!c.listed_node && node) c.listed_node = node;
+                return;
+            }
         }
         endpoint.use_tls = true;
-        candidates.push_back(Candidate{std::move(endpoint), node});
+        candidates.push_back(Candidate{std::move(endpoint), node, relay_port, stun_port});
     };
     for (const auto& source : sources) add_candidate(source, std::nullopt);
     for (const auto& source : sources) {
         const auto& listed = listed_by(source);
         if (listed.empty()) continue;
-        for (const auto& entry : listed) add_candidate(entry.endpoint, entry.node);
+        for (const auto& entry : listed)
+            add_candidate(entry.endpoint, entry.node, entry.relay_port, entry.stun_port);
         break;
     }
 
@@ -778,8 +797,10 @@ Result<Tier1Membership> Tier1Directory::refresh_verified(
             const auto check = sec::check_tier1_endpoint_proof(
                 *state_->walker->authority(), proof, candidate.host, candidate.port, probe.nonce);
             if (check == sec::EndpointProofCheck::Valid) {
-                verified.push_back(
-                    Tier1Server{node_b64(proof.node), candidate.host, candidate.port});
+                verified.push_back(Tier1Server{node_b64(proof.node), candidate.host,
+                                               candidate.port,
+                                               candidates[probe.candidate].relay_port,
+                                               candidates[probe.candidate].stun_port});
                 continue;
             }
             note("proof " + std::string(sec::endpoint_proof_check_name(check)));
