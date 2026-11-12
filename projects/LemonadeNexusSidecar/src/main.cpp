@@ -111,6 +111,7 @@ struct SidecarConfig {
     std::string mesh_selection{"auto"};        // local | auto | <node id>
     std::string link_token_out;                // after the join, mint an invite for this group and write it here (0600)
     std::vector<std::string> link_token_perms; // permissions that invite grants (default: the server's default set)
+    std::string device_name;                   // name of this device's endpoint when the join creates it
 };
 
 std::optional<ExposeMapping> parse_expose(const std::string& spec) {
@@ -145,6 +146,7 @@ void apply_json_config(SidecarConfig& cfg, const nlohmann::json& j) {
     if (j.contains("inference"))    cfg.inference     = j.at("inference").get<bool>();
     if (j.contains("catalog"))      cfg.catalog_path  = j.at("catalog").get<std::string>();
     if (j.contains("genesis_key"))  cfg.genesis_key   = j.at("genesis_key").get<std::string>();
+    if (j.contains("device_name"))  cfg.device_name   = j.at("device_name").get<std::string>();
     if (j.contains("mesh_port"))    cfg.mesh_port     = j.at("mesh_port").get<uint16_t>();
     if (j.contains("mesh_local"))   cfg.mesh_local    = j.at("mesh_local").get<std::string>();
     if (j.contains("mesh_selection")) cfg.mesh_selection = j.at("mesh_selection").get<std::string>();
@@ -356,6 +358,10 @@ int main(int argc, char* argv[]) {
         client.set_inference_node(true);
         spdlog::info("Joining as a Tier 3 inference node");
     }
+    if (!cfg.device_name.empty() && !client.set_device_name(cfg.device_name)) {
+        spdlog::error("device_name refused: {}", cfg.device_name);
+        return 1;
+    }
     if (!cfg.genesis_key.empty()) {
         auto g = client.set_genesis_key(cfg.genesis_key);
         if (!g.ok) {
@@ -441,6 +447,40 @@ int main(int argc, char* argv[]) {
             {"exposed", exposed},
             {"mesh_port", mesh_port ? mesh_port->status() : nlohmann::json()},
         };
+        res.set_content(j.dump(), "application/json");
+    });
+    // Live dataplane view for a status page: the tunnel status the SDK reports
+    // (server_path direct/wss/none, tunnel_up, per-peer endpoint or relay,
+    // last handshake, bytes) plus this sidecar's own state and version.
+    control.Get("/mesh", [&](const httplib::Request&, httplib::Response& res) {
+        const auto ms = client.mesh_status();
+        nlohmann::json peers = nlohmann::json::array();
+        for (const auto& p : client.get_mesh_peers()) {
+            peers.push_back({{"node_id", p.node_id}, {"hostname", p.hostname},
+                             {"tunnel_ip", p.tunnel_ip}, {"is_online", p.is_online},
+                             {"server_online", p.server_online}, {"path", p.path},
+                             {"endpoint", p.endpoint}, {"relay_endpoint", p.relay_endpoint},
+                             {"last_handshake", p.last_handshake}, {"last_seen", p.last_seen},
+                             {"rx_bytes", p.rx_bytes}, {"tx_bytes", p.tx_bytes},
+                             {"latency_ms", p.latency_ms}, {"mesh_pubkey", p.mesh_pubkey},
+                             {"permissions", p.permissions}});
+        }
+        nlohmann::json j = {
+            {"version", NEXUS_VERSION}, {"commit", NEXUS_GIT_COMMIT},
+            {"server", cfg.host + ":" + std::to_string(cfg.port)},
+            {"is_up", ms.is_up}, {"tunnel_up", ms.tunnel_up},
+            {"server_path", ms.server_path}, {"needs_rejoin", ms.needs_rejoin},
+            {"tunnel_ip", ms.tunnel_ip}, {"peer_count", ms.peer_count},
+            {"online_count", ms.online_count},
+            {"total_rx_bytes", ms.total_rx_bytes}, {"total_tx_bytes", ms.total_tx_bytes},
+            {"dataplane_peers", ms.peers}, {"peers", peers},
+        };
+        {
+            std::lock_guard lock(state.mtx);
+            j["status"] = state.status;
+            j["node_id"] = state.node_id;
+            j["join_failures"] = state.join_failures;
+        }
         res.set_content(j.dump(), "application/json");
     });
     // Mint a device link token so another device can join this account.
