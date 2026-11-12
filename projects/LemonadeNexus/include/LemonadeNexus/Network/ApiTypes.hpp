@@ -326,6 +326,8 @@ struct ServerEntry {
     std::string fqdn;        // cert FQDN for verified HTTPS ("" if unknown)
     std::string pubkey;
     uint16_t    http_port{0};
+    uint16_t    relay_port{0};   // 0 = not known (the canonical 9103 applies)
+    uint16_t    stun_port{0};    // 0 = not known (the canonical 3478 applies)
     uint64_t    last_seen{0};
     bool        healthy{true};
 };

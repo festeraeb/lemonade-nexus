@@ -83,6 +83,16 @@ bool loop_was_suspended(std::chrono::milliseconds wall_elapsed, std::chrono::mil
     return wall_elapsed - busy - std::max(planned_wait, std::chrono::milliseconds{0}) > kResumeGap;
 }
 
+std::string reported_server_path(const std::string& mux_path, bool running, bool tunnel_up) {
+    (void)running; (void)tunnel_up;
+    return mux_path;  // stub
+}
+
+bool heartbeat_means_node_gone(int http_status, const std::string& error) {
+    (void)http_status; (void)error;
+    return false;  // stub
+}
+
 bool tunnel_alive(int64_t server_seen_unix, int64_t now_unix,
                   std::chrono::steady_clock::duration since_enable) {
     if (server_seen_unix > 0 && now_unix - server_seen_unix < kTunnelAliveWindow.count()) {

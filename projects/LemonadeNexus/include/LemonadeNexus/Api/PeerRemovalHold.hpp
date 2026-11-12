@@ -24,8 +24,12 @@ namespace nexus::api {
 class PeerRemovalHold {
 public:
     using Remove = std::function<void(const std::string& peer_key)>;
+    /// Runs `work` later. Given, the last release() hands the removal to it
+    /// instead of running it at once.
+    using Defer = std::function<void(std::function<void()> work)>;
 
-    explicit PeerRemovalHold(Remove remove) : remove_(std::move(remove)) {}
+    explicit PeerRemovalHold(Remove remove, Defer defer = {})
+        : remove_(std::move(remove)), defer_(std::move(defer)) {}
 
     /// Start one hold for `principal`. Holds for one principal are counted,
     /// so concurrent requests by the same key release only when all ended.
@@ -76,6 +80,7 @@ private:
     mutable std::mutex mutex_;
     std::map<std::string, Held> held_;
     Remove remove_;
+    Defer defer_;
 };
 
 }  // namespace nexus::api

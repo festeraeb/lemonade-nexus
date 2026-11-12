@@ -42,6 +42,8 @@ struct Tier1Server {
     std::string node_id;  ///< base64 Ed25519 node identity
     std::string host;     ///< certificate FQDN the proof names
     uint16_t    port{0};
+    uint16_t    relay_port{0};  ///< from the server list; 0 = the canonical 9103
+    uint16_t    stun_port{0};   ///< from the server list; 0 = the canonical 3478
 };
 
 /// Progress of the authority chain walk that a refresh runs, for display. A

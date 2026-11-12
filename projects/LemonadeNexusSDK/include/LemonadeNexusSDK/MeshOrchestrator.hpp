@@ -107,6 +107,16 @@ inline constexpr std::chrono::seconds kTunnelAliveWindow{20};
 /// alive for the first kTunnelAliveWindow after enable_mesh: a fresh mesh has
 /// carried nothing yet, and "unknown" reads as alive so it is not torn down
 /// before its first heartbeat.
+/// The server_path an application reads: the mux's path ("direct", "wss",
+/// "none") when the WSS rung is configured, else the UDP tunnel's state
+/// ("direct" while alive, "none" when not); empty while the mesh is off.
+[[nodiscard]] std::string reported_server_path(const std::string& mux_path, bool running,
+                                               bool tunnel_up);
+
+/// True when a heartbeat answer says the server no longer knows this device's
+/// node: the session is useless and the application must join again.
+[[nodiscard]] bool heartbeat_means_node_gone(int http_status, const std::string& error);
+
 [[nodiscard]] bool tunnel_alive(int64_t server_seen_unix, int64_t now_unix,
                                 std::chrono::steady_clock::duration since_enable);
 

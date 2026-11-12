@@ -4674,3 +4674,66 @@ TEST_F(AccountDeleteHttpTest, ARepeatedDeletionIsRefusedOnlyBecauseTheKeyIsGone)
     EXPECT_EQ(again->status, 401);
     EXPECT_EQ(tree->tree_digest(), digest);
 }
+
+// --- CESARops work Nexus fixes (2026-11-12) ---
+
+// A peer removal held for a device that removed its own node over its own
+// tunnel waits past the moment httplib handed the answer to the socket: the
+// bytes still sit in the server's netstack. The removal runs only when the
+// deferral the server supplies runs it (a short delay in the server).
+TEST(PeerRemovalHoldTest, ReleasedPeersGoWhenTheDeferralRunsNotAtRelease) {
+    std::vector<std::string> removed;
+    std::vector<std::function<void()>> later;
+    api::PeerRemovalHold holds([&](const std::string& key) { removed.push_back(key); },
+                               [&](std::function<void()> work) { later.push_back(std::move(work)); });
+    holds.hold("ed25519:a");
+    holds.remove_or_defer("ed25519:a", "peer-a");
+    holds.release("ed25519:a");
+    EXPECT_TRUE(removed.empty()) << "the answer may still be on its way through the tunnel";
+    ASSERT_EQ(later.size(), 1u);
+    later.front()();
+    EXPECT_EQ(removed, (std::vector<std::string>{"peer-a"}));
+}
+
+// GET /api/servers names each server's relay and STUN ports, so a client
+// reaches a relay that does not listen on the canonical 9103 / 3478.
+TEST(ServerEntryJsonTest, RelayAndStunPortsAreListedWhenKnown) {
+    network::ServerEntry e;
+    e.endpoint = "192.0.2.1:9852";
+    e.http_port = 9822;
+    e.relay_port = 9872;
+    e.stun_port = 9862;
+    nlohmann::json j = e;
+    EXPECT_EQ(j.value("relay_port", 0), 9872);
+    EXPECT_EQ(j.value("stun_port", 0), 9862);
+    network::ServerEntry back = j.get<network::ServerEntry>();
+    EXPECT_EQ(back.relay_port, 9872);
+    EXPECT_EQ(back.stun_port, 9862);
+    network::ServerEntry unknown;
+    nlohmann::json u = unknown;
+    EXPECT_FALSE(u.contains("relay_port"));
+}
+
+// A device that left on its own stays out until it joins again with an
+// invite: an identity-only sign-in must not create a new device (and a new
+// group) for it.
+TEST_F(InviteHttpTest, ADeviceThatLeftCannotSignInAgainWithoutAnInvite) {
+    const auto alice = join();
+    const auto device = join(invite_token(alice));
+    auto left = post(device, "/api/tree/node/delete/" + device.node_id, json::object());
+    ASSERT_NE(left, nullptr);
+    ASSERT_EQ(left->status, 200) << left->body;
+    ASSERT_FALSE(tree->get_node(device.node_id).has_value());
+    const auto groups_before = tree->nodes_snapshot().size();
+
+    auto signin = join_node(device.kp);
+    ASSERT_NE(signin, nullptr);
+    EXPECT_EQ(signin->status, 403) << signin->body;
+    EXPECT_FALSE(tree->get_node(device.node_id).has_value());
+    EXPECT_EQ(tree->nodes_snapshot().size(), groups_before) << "no new device or group";
+
+    auto again = join_node(device.kp, invite_token(alice));
+    ASSERT_NE(again, nullptr);
+    ASSERT_EQ(again->status, 200) << again->body;
+    EXPECT_TRUE(tree->get_node(device.node_id).has_value());
+}

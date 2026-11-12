@@ -64,6 +64,7 @@ public:
     std::map<std::string, FakeServer> servers;
     const Chain* network_chain = nullptr;  // network id for proofs
     std::vector<std::string> server_list;  // hosts listed by /api/servers
+    std::map<std::string, std::pair<uint16_t, uint16_t>> listed_ports;  // host -> relay, stun
     std::map<std::string, lnsdk::HttpReply> onboard_info;  // GET /api/onboard/info by host
 
     std::optional<lnsdk::HttpReply> get(const lnsdk::ServerEndpoint& ep, const std::string& path) {
@@ -103,6 +104,10 @@ public:
                 json e{{"fqdn", host}, {"http_port", kPort}, {"endpoint", host + ":9100"}};
                 if (entry.identity) {
                     e["pubkey"] = nexus::crypto::to_base64(entry.identity->public_key);
+                }
+                if (const auto ports = listed_ports.find(host); ports != listed_ports.end()) {
+                    e["relay_port"] = ports->second.first;
+                    e["stun_port"] = ports->second.second;
                 }
                 list.push_back(e);
             }
@@ -1230,4 +1235,26 @@ TEST(SeipName, ASeipFqdnNamesItsRegionAndDomain) {
                               ".us.seip.example", "sn01.us.seip.exa mple", "seip.example"}) {
         EXPECT_FALSE(lnsdk::parse_seip_fqdn(other).has_value()) << other;
     }
+}
+
+// A verified member keeps the relay and STUN ports the server list names for
+// it, so the mesh reaches a relay that is not on the canonical port.
+TEST_F(SdkTier1Test, AVerifiedMemberCarriesTheRelayAndStunPortsItsListingNames) {
+    auto dir = directory();
+    ASSERT_TRUE(dir.set_genesis_key(b64(chain.genesis.public_key)));
+    net.listed_ports["t1a.example"] = {9872, 9862};
+    const auto refreshed = dir.refresh(seed("t2.example"));
+    ASSERT_TRUE(refreshed.ok) << refreshed.error;
+    bool saw_a = false, saw_b = false;
+    for (const auto& s : refreshed.value.servers) {
+        if (s.host == "t1a.example") {
+            saw_a = true;
+            EXPECT_EQ(s.relay_port, 9872);
+            EXPECT_EQ(s.stun_port, 9862);
+        } else if (s.host == "t1b.example") {
+            saw_b = true;
+            EXPECT_EQ(s.relay_port, 0) << "not named: the canonical port applies";
+        }
+    }
+    EXPECT_TRUE(saw_a && saw_b);
 }

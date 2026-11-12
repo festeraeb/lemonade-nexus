@@ -3094,3 +3094,24 @@ TEST(SdkMeshTier1Recheck, AMissedMemberIsVerifiedAgainWithinAMinute) {
     EXPECT_TRUE(O::tier1_recheck_due(5, 5, O::kTier1Recheck));
     EXPECT_LE(O::kTier1RecheckMissing, seconds(60));
 }
+
+// server_path is what an application shows: "direct" / "wss" once proved,
+// "none" while no path works. Without the WSS rung (no mux) the SDK used to
+// leave it empty; the UDP tunnel is then the path.
+TEST(SdkMeshStatusTest, ServerPathWithoutTheWssRungFollowsTheUdpTunnel) {
+    EXPECT_EQ(lnsdk::reported_server_path("", true, true), "direct");
+    EXPECT_EQ(lnsdk::reported_server_path("", true, false), "none");
+    EXPECT_EQ(lnsdk::reported_server_path("", false, false), "");
+    EXPECT_EQ(lnsdk::reported_server_path("wss", true, true), "wss");
+    EXPECT_EQ(lnsdk::reported_server_path("none", true, true), "none");
+}
+
+// A heartbeat answered "node not found" means the server no longer knows this
+// device (deleted, or a server that lost it): the application must join
+// again, whatever the dataplane says.
+TEST(SdkMeshStatusTest, AHeartbeatForAnUnknownNodeMeansJoinAgain) {
+    EXPECT_TRUE(lnsdk::heartbeat_means_node_gone(404, "node not found"));
+    EXPECT_FALSE(lnsdk::heartbeat_means_node_gone(404, "no such route"));
+    EXPECT_FALSE(lnsdk::heartbeat_means_node_gone(0, "heartbeat request failed"));
+    EXPECT_FALSE(lnsdk::heartbeat_means_node_gone(200, ""));
+}
