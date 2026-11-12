@@ -83,6 +83,10 @@ public:
     /// not called again. Thread-safe.
     void set_ingress_source_handler(IngressSourceHandler handler);
 
+    /// The netstack MTU the plane started with (0 when inactive): the
+    /// largest inner IP packet every enabled path carries in one link packet.
+    [[nodiscard]] uint32_t mtu() const;
+
     /// The dataplane's bound local UDP port (0 when inactive).
     [[nodiscard]] uint16_t bound_port() const;
 

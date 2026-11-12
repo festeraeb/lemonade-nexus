@@ -110,7 +110,9 @@ protected:
         api.Get("/ping", [](const httplib::Request&, httplib::Response& res) {
             res.set_content("pong-through-relay", "text/plain");
         });
-
+        api.Post("/upload", [](const httplib::Request& req, httplib::Response& res) {
+            res.set_content(std::to_string(req.body.size()), "text/plain");
+        });
         api_port = api.bind_to_any_port("127.0.0.1");
         ASSERT_GT(api_port, 0);
         api_thread = std::thread([this] { api.listen_after_bind(); });
@@ -586,6 +588,133 @@ TEST_F(SdkRelayFallbackTest, AUdpBlockedHintUsesTheWebSocketRouteAtOnce) {
         10s));
     EXPECT_EQ(blocked.received.load(), 0);
     EXPECT_EQ(ping_over_mesh(bob, "10.64.0.2"), "pong-through-relay");
+}
+
+namespace {
+
+/// A UDP forwarder in front of the relay that records the size of every
+/// datagram the client side sends through it.
+struct SizeRecordingShim {
+    int front{-1}, back{-1};
+    uint16_t port{0};
+    sockaddr_in relay{};
+    std::atomic<bool> run{true};
+    std::atomic<std::size_t> max_up{0};
+    std::atomic<uint64_t> up{0};
+    std::thread t_up, t_down;
+    sockaddr_in client{};
+    std::atomic<bool> have_client{false};
+    explicit SizeRecordingShim(uint16_t relay_port) {
+        auto bind_any = [](uint16_t* out) {
+            int sk = ::socket(AF_INET, SOCK_DGRAM, 0);
+            sockaddr_in a{};
+            a.sin_family = AF_INET;
+            a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            ::bind(sk, reinterpret_cast<sockaddr*>(&a), sizeof a);
+            socklen_t len = sizeof a;
+            ::getsockname(sk, reinterpret_cast<sockaddr*>(&a), &len);
+            if (out) *out = ntohs(a.sin_port);
+            timeval tv{0, 50 * 1000};
+            ::setsockopt(sk, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
+            return sk;
+        };
+        front = bind_any(&port);
+        back = bind_any(nullptr);
+        relay.sin_family = AF_INET;
+        relay.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        relay.sin_port = htons(relay_port);
+        t_up = std::thread([this] {
+            std::vector<char> buf(70000);
+            while (run) {
+                sockaddr_in from{};
+                socklen_t len = sizeof from;
+                const auto n = ::recvfrom(front, buf.data(), buf.size(), 0,
+                                          reinterpret_cast<sockaddr*>(&from), &len);
+                if (n <= 0) continue;
+                client = from;
+                have_client = true;
+                ++up;
+                std::size_t cur = max_up.load();
+                while (static_cast<std::size_t>(n) > cur && !max_up.compare_exchange_weak(cur, n)) {
+                }
+                ::sendto(back, buf.data(), n, 0, reinterpret_cast<sockaddr*>(&relay), sizeof relay);
+            }
+        });
+        t_down = std::thread([this] {
+            std::vector<char> buf(70000);
+            while (run) {
+                const auto n = ::recv(back, buf.data(), buf.size(), 0);
+                if (n <= 0 || !have_client) continue;
+                ::sendto(front, buf.data(), n, 0, reinterpret_cast<sockaddr*>(&client), sizeof client);
+            }
+        });
+    }
+    ~SizeRecordingShim() {
+        run = false;
+        t_up.join();
+        t_down.join();
+        ::close(front);
+        ::close(back);
+    }
+};
+
+}  // namespace
+
+// The netstack MTU follows the smallest enabled rung: with the 9103 relay
+// rung on a 1500-byte link, a full-size inner packet plus the BoringTun
+// header and the relay's Data header is exactly one 1500-byte IPv4 packet,
+// never more (so it is never fragmented on the way to the relay).
+TEST_F(SdkRelayFallbackTest, AFullSizePacketCrossesTheRelayRungUnfragmented) {
+    EXPECT_EQ(bob.mtu(), 1414u);
+    EXPECT_EQ(alice.mtu(), 1414u);
+    SizeRecordingShim shim(r->local_port());
+    const auto window = relay::relay_rendezvous_window(now_s());
+    const auto open = [&](lnsdk::BoringtunMesh& self, const std::string& peer_key,
+                          const std::string& holder, uint16_t relay_port,
+                          lnsdk::RelayChannel& channel) {
+        const auto rv = self.relay_rendezvous(peer_key, "relay-1", window);
+        ASSERT_TRUE(rv.has_value());
+        lnsdk::RelayChannel::Options options;
+        options.relay_ipv4 = "127.0.0.1";
+        options.relay_port = relay_port;
+        options.dataplane_port = self.bound_port();
+        options.allocate = lnsdk::relay_allocate_datagram(*rv, sdk_ticket(holder, "relay-1"), 1);
+        options.allocate_retry = 200ms;
+        ASSERT_TRUE(channel.open(std::move(options)));
+    };
+    lnsdk::RelayChannel alice_channel, bob_channel;
+    open(alice, bob_keys.second, "alice", r->local_port(), alice_channel);
+    open(bob, alice_keys.second, "bob", shim.port, bob_channel);
+    ASSERT_TRUE(eventually(
+        [&] {
+            return alice_channel.state() == lnsdk::RelayChannel::State::Paired &&
+                   bob_channel.state() == lnsdk::RelayChannel::State::Paired;
+        },
+        [] {}, 5s));
+    ASSERT_TRUE(alice.set_peer_relay(bob_keys.second, alice_channel.local_endpoint(),
+                                     alice_channel.relay_endpoint()));
+    ASSERT_TRUE(bob.set_peer_relay(alice_keys.second, bob_channel.local_endpoint(),
+                                   bob_channel.relay_endpoint()));
+
+    // Bob uploads to Alice through the relay: his full-size segments cross
+    // the recorded leg with the relay header on them.
+    const uint16_t egress = bob.tcp_egress("10.64.0.2", 8080);
+    ASSERT_NE(egress, 0);
+    httplib::Client client("127.0.0.1", egress);
+    client.set_connection_timeout(5, 0);
+    client.set_read_timeout(10, 0);
+    const std::string body(256 * 1024, 'u');
+    httplib::Result res;
+    for (int i = 0; i < 25 && !(res && res->status == 200); ++i) {
+        res = client.Post("/upload", body, "application/octet-stream");
+        if (!(res && res->status == 200)) std::this_thread::sleep_for(200ms);
+    }
+    ASSERT_TRUE(res && res->status == 200);
+    EXPECT_EQ(res->body, std::to_string(body.size()));
+    constexpr std::size_t kLinkPayload = 1500 - 20 - 8;  // IPv4 + UDP headers
+    EXPECT_EQ(shim.max_up.load(), kLinkPayload) << "the largest datagram to the relay";
+    alice_channel.close();
+    bob_channel.close();
 }
 
 TEST_F(SdkRelayFallbackTest, ARefusingRelayIsSkippedForTheNextOne) {

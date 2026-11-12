@@ -394,6 +394,13 @@ struct BoringtunConfig {
     /// server and fails over between them (TransportMux); a route that fails
     /// moves the WebSocket path to the next one. Empty: UDP only.
     std::vector<std::string> wss_urls;
+    /// MTU of the link toward the server, in bytes. 0: read it from the
+    /// route to server_endpoint (IP_MTU where the platform has it), else
+    /// 1500.
+    uint32_t link_mtu{0};
+    /// The 9103 UDP relay rung may carry this plane's traffic (relay
+    /// fallback for peers). Its Data header makes it the smallest rung.
+    bool relay_rung{true};
 };
 
 struct TunnelStatus {

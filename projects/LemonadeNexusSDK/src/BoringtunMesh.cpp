@@ -8,6 +8,12 @@
 #include <LemonadeNexus/Relay/RelayWire.hpp>
 
 #include <virtual_netstack.h>
+#if defined(__linux__)
+#  include <arpa/inet.h>
+#  include <netinet/in.h>
+#  include <sys/socket.h>
+#  include <unistd.h>
+#endif
 #include <sodium.h>
 #include <spdlog/spdlog.h>
 
@@ -83,6 +89,40 @@ std::optional<Cidr> parse_subnet(const std::string& text) {
     return cidr;
 }
 
+/// The MTU of the route toward `endpoint` ("a.b.c.d:port"): the interface
+/// MTU or a learned path MTU, from a connected UDP socket (IP_MTU, Linux).
+/// nullopt where the platform cannot say or the endpoint does not parse.
+std::optional<uint32_t> route_mtu(const std::string& endpoint) {
+#if defined(__linux__)
+    const auto colon = endpoint.rfind(':');
+    if (colon == std::string::npos) return std::nullopt;
+    sockaddr_in to{};
+    to.sin_family = AF_INET;
+    if (inet_pton(AF_INET, endpoint.substr(0, colon).c_str(), &to.sin_addr) != 1) return std::nullopt;
+    try {
+        to.sin_port = htons(static_cast<uint16_t>(std::stoi(endpoint.substr(colon + 1))));
+    } catch (...) {
+        return std::nullopt;
+    }
+    const int sock = ::socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0) return std::nullopt;
+    std::optional<uint32_t> out;
+    if (::connect(sock, reinterpret_cast<const sockaddr*>(&to), sizeof to) == 0) {
+        int mtu = 0;
+        socklen_t len = sizeof mtu;
+        if (::getsockopt(sock, IPPROTO_IP, IP_MTU, &mtu, &len) == 0 && mtu > 0) {
+            // Loopback reports 65536; a real path is never above a jumbo frame.
+            out = static_cast<uint32_t>(std::min(mtu, 9000));
+        }
+    }
+    ::close(sock);
+    return out;
+#else
+    (void)endpoint;
+    return std::nullopt;
+#endif
+}
+
 /// The netstack hands every outbound IP packet here; re-inject into the
 /// dataplane for encryption + send. ctx is the UserspaceDataplane*.
 void mesh_output_trampoline(void* ctx, const uint8_t* pkt, size_t len) {
@@ -104,6 +144,7 @@ struct BoringtunMesh::Impl {
     std::string        server_pubkey;     // never removed by sync_peers
     std::atomic<bool>  active{false};
     BoringtunConfig    started_cfg;       // what the live plane was started with
+    std::atomic<uint32_t> mtu{0};         // netstack MTU of the live plane
 
     // Guards ns, tunnel_addr, and egress_cache. stop() destroys the netstack
     // while egress and ingress calls may run on other threads, so every read
@@ -206,13 +247,27 @@ bool BoringtunMesh::start(const BoringtunConfig& config) {
     dpcfg.private_key_b64 = config.private_key;
     dpcfg.public_key_b64  = config.public_key;
     dpcfg.listen_port     = config.listen_port;  // 0 = random
-    if (!config.wss_urls.empty()) {
-        // Paths swap under a live stream: size the netstack for the smallest
-        // rung (the 9103 relay's Data header on a 1500-byte link), so no
-        // move black-holes a packet that fit the old path.
-        dpcfg.mtu = pinned_mtu(1500, true, nexus::relay::kRelayHeaderSize, dpcfg.mtu);
+    // Size the netstack for the smallest enabled path: a peer's traffic may
+    // move between direct UDP, the 9103 relay (its Data header), and the
+    // WebSocket rung (a stream: no per-packet limit) under a live stream, and
+    // a packet sized for a larger path would be fragmented or lost on the
+    // smaller one.
+    {
+        const uint32_t link = config.link_mtu != 0 ? config.link_mtu
+                                                   : route_mtu(config.server_endpoint).value_or(1500);
+        const uint32_t mtu = pinned_mtu(link, config.relay_rung, nexus::relay::kRelayHeaderSize,
+                                        dpcfg.mtu);
+        if (mtu >= 576) {
+            dpcfg.mtu = mtu;
+        } else {
+            spdlog::warn("[BoringtunMesh] link MTU {} leaves no usable tunnel MTU; using {}", link,
+                         dpcfg.mtu);
+        }
+        spdlog::info("[BoringtunMesh] netstack MTU {} (link {}, relay rung {})", dpcfg.mtu, link,
+                     config.relay_rung ? "on" : "off");
     }
 
+    impl_->mtu.store(dpcfg.mtu);
     NsHandle* ns = ns_create(dpcfg.mtu, kTcpBufferBytes, &mesh_output_trampoline, &impl_->dp);
     if (!ns) return false;
 
@@ -303,6 +358,8 @@ void BoringtunMesh::stop() {
     ns_destroy(ns);
     spdlog::info("[BoringtunMesh] dataplane down");
 }
+
+uint32_t BoringtunMesh::mtu() const { return impl_->active.load() ? impl_->mtu.load() : 0; }
 
 bool BoringtunMesh::is_active() const {
     return impl_->active.load();

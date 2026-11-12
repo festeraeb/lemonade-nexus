@@ -1415,3 +1415,83 @@ TEST(TransportWssList, ARouteThatDiesFailsOverToTheNextOne) {
     EXPECT_EQ(get_once(mesh.egress(), "/ping"), "pong");
     mux.stop();
 }
+
+TEST(TransportMtu, TheMeshPlaneFollowsTheSmallestEnabledRung) {
+    ASSERT_GE(sodium_init(), 0);
+    const auto start = [](uint32_t link, bool relay) {
+        lnsdk::BoringtunMesh mesh;
+        const auto keys = lnsdk::BoringtunMesh::generate_keypair();
+        lnsdk::BoringtunConfig cfg;
+        cfg.private_key = keys.first;
+        cfg.public_key = keys.second;
+        cfg.tunnel_ip = "10.64.0.9/32";
+        cfg.allowed_ips = {"10.64.0.0/10"};
+        cfg.link_mtu = link;
+        cfg.relay_rung = relay;
+        EXPECT_TRUE(mesh.start(cfg));
+        const auto mtu = mesh.mtu();
+        mesh.stop();
+        return mtu;
+    };
+    EXPECT_EQ(start(1500, true), 1414u);   // the 9103 relay's Data header
+    EXPECT_EQ(start(1500, false), 1420u);  // direct UDP and WSS only: the dataplane cap
+    EXPECT_EQ(start(1400, true), 1314u);   // a 1400-byte link (PPPoE, tunnels)
+    EXPECT_EQ(start(1400, false), 1340u);
+}
+
+// A full-size inner packet crosses the direct rung within one 1500-byte
+// link packet, and the WSS rung after a swap carries the same packets.
+TEST(TransportMtu, AFullSizePacketCrossesTheDirectAndWssRungs) {
+    ASSERT_GE(sodium_init(), 0);
+    MeshPair server_side([](httplib::Server& api) {
+        api.Post("/upload", [](const httplib::Request& req, httplib::Response& res) {
+            res.set_content(std::to_string(req.body.size()), "text/plain");
+        });
+    });
+    BridgeServer srv({{"dataplane", server_side.server_dp.bound_port()}});
+    ASSERT_TRUE(srv.ok());
+    UdpShim shim(server_side.server_dp.bound_port());
+    lnsdk::set_ca_bundle_path(srv.cert());
+    const auto keys = lnsdk::BoringtunMesh::generate_keypair();
+    (void)server_side.server_dp.remove_peer(server_side.client_keys.pub_b64);
+    ASSERT_TRUE(server_side.server_dp.add_peer(keys.second, "10.64.0.2/32", ""));
+    lnsdk::BoringtunMesh mesh;
+    lnsdk::BoringtunConfig cfg;
+    cfg.private_key = keys.first;
+    cfg.public_key = keys.second;
+    cfg.tunnel_ip = "10.64.0.2/32";
+    cfg.server_public_key = server_side.server_keys.pub_b64;
+    cfg.server_endpoint = shim.endpoint();
+    cfg.server_tunnel_ip = "10.64.0.1";
+    cfg.allowed_ips = {"10.64.0.0/10"};
+    cfg.link_mtu = 1500;
+    cfg.wss_urls = {srv.url("dataplane")};
+    ASSERT_TRUE(mesh.start(cfg));
+    ASSERT_EQ(mesh.mtu(), 1414u);
+    ASSERT_TRUE(wait_for([&] { return mesh.server_path() == "direct"; }, 8s));
+    const uint16_t egress = mesh.tcp_egress("10.64.0.1", 80);
+    const auto upload = [&] {
+        httplib::Client c("127.0.0.1", egress);
+        c.set_read_timeout(10, 0);
+        const std::string body(256 * 1024, 'm');
+        for (int i = 0; i < 20; ++i) {
+            if (auto r = c.Post("/upload", body, "application/octet-stream"); r && r->status == 200) {
+                return r->body == std::to_string(body.size());
+            }
+            std::this_thread::sleep_for(200ms);
+        }
+        return false;
+    };
+    shim.set_recording(true);
+    ASSERT_TRUE(upload());
+    shim.set_recording(false);
+    std::size_t largest = 0;
+    for (const auto& d : shim.recorded()) largest = std::max(largest, d.size());
+    EXPECT_EQ(largest, 1414u + lnsdk::kBoringtunDataOverhead);  // a full-size segment
+    EXPECT_LE(largest + lnsdk::kIpv4UdpOverhead, 1500u);
+    shim.set_blocked(true);
+    ASSERT_TRUE(wait_for([&] { return mesh.server_path() == "wss"; }, 5s));
+    EXPECT_TRUE(upload());
+    mesh.stop();
+    lnsdk::set_ca_bundle_path("");
+}

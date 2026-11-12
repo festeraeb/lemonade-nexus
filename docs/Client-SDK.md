@@ -418,8 +418,14 @@ public endpoints. They connect over the LAN instead:
   accepts TCP never wins), probes the tunnel every 100 ms, moves to the other
   path after 400 ms without an answer, and tries UDP again 10 seconds after
   a move. A move keeps the BoringTun session: no handshake runs and open TCP
-  streams continue. With the bridge, the netstack MTU is 1414 bytes, the
-  size the 9103 relay rung carries on a 1500-byte link.
+  streams continue.
+- The netstack MTU follows the smallest enabled path: the link MTU toward
+  the server (`BoringtunConfig::link_mtu`, or read from the route on Linux,
+  else 1500) minus the outer IPv4 and UDP headers (28), the BoringTun data
+  header (32), and the 9103 relay's Data header (26) while the relay rung is
+  enabled (`relay_rung`, default on), capped at 1420. On a 1500-byte link
+  that is 1414 bytes, so a full-size packet fits one link packet on every
+  path, the relay included.
 - A LAN path that gets no authenticated packet for the liveness window
   (three keepalive intervals plus 5 seconds) ends at the next monitor pass:
   the peer is probed again at every address and falls back to the public
