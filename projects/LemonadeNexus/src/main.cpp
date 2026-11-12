@@ -920,7 +920,10 @@ int main(int argc, char* argv[]) {
     // UDP (TransportBridge.hpp). Off unless configured.
     std::unique_ptr<nexus::network::TransportBridge> transport_bridge;
     if (config.transport_bridge) {
-        transport_bridge = std::make_unique<nexus::network::TransportBridge>();
+        nexus::network::TransportBridge::Limits bridge_limits;
+        bridge_limits.max_connections = config.transport_bridge_max_connections;
+        bridge_limits.max_per_ip = config.transport_bridge_max_per_ip;
+        transport_bridge = std::make_unique<nexus::network::TransportBridge>(bridge_limits);
         (void)transport_bridge->add_target("dataplane", udp_port);
         (void)transport_bridge->add_target("relay", relay.local_port());
         spdlog::info("Transport bridge: {}dataplane -> 127.0.0.1:{}, {}relay -> 127.0.0.1:{}",

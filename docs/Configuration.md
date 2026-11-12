@@ -174,6 +174,8 @@ listener in place. There is no plaintext fallback.
 |----------|---------|----------|---------|-------------|
 | `--transport-bridge` | `SP_TRANSPORT_BRIDGE=1` | `transport_bridge` | `false` | Serve WebSocket routes to the mesh transport port and the relay port on the public HTTPS listener |
 | | | `transport_bridge_urls` | `[]` | Other absolute `wss://` routes to this server's dataplane bridge route; the join answer lists them in `mesh_wss_urls` and clients fail over to them in order |
+| | | `transport_bridge_max_connections` | `32` | Bridge connections open at once (each holds one listener thread) |
+| | | `transport_bridge_max_per_ip` | `4` | Bridge connections per client address; raise it behind a TCP pass-through proxy, where every client has the proxy's address |
 
 With the bridge on, `GET /api/transport/ws/dataplane` and
 `GET /api/transport/ws/relay` upgrade to a WebSocket on the public HTTPS

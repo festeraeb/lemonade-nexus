@@ -87,6 +87,11 @@ struct ServerConfig {
     /// "wss://" URLs (for example through a tunnel provider). Clients try
     /// them in order after the route on the public listener.
     std::vector<std::string> transport_bridge_urls;
+    /// Bridge connections at once, and per client address. Behind a TCP
+    /// pass-through proxy (SNI routing) every client has the proxy's
+    /// address: raise the per-address limit there.
+    std::size_t transport_bridge_max_connections{32};
+    std::size_t transport_bridge_max_per_ip{4};
 
     // First-run CLI mode: initialize the data directory (identity + gossip
     // keypairs), print onboarding info (pubkeys, node ID, next steps), and exit.

@@ -101,6 +101,17 @@ for sc in "$@"; do
         sleep 15; snap settled
         ip netns exec $NC curl -s --cacert "$D/cert.pem" https://10.99.0.2/api/health >> "$D/client.jsonl"; echo >> "$D/client.jsonl"
         kill -0 $SPID && echo '{"event":"server_alive"}' >> "$D/client.jsonl" ;;
+      ipchange)
+        # The client's address changes mid-stream (Wi-Fi to cellular): the
+        # old address goes away and a new one comes up; the client process
+        # gets no notice. A /ping every 100 ms shows the outage.
+        run_client "$D" --stream-sec 0 --upload-mib 0 --ping-watch-sec 40 &
+        CPID=$!
+        sleep 12; echo "ipchange $(date +%s.%N)" >> "$D/events"
+        ip -n $NC addr add 10.99.0.11/24 dev nxc0; ip -n $NC addr del 10.99.0.1/24 dev nxc0
+        sleep 10; echo "ipchange-under-udp-block $(date +%s.%N)" >> "$D/events"
+        udp_drop_on; ip -n $NC addr add 10.99.0.21/24 dev nxc0; ip -n $NC addr del 10.99.0.11/24 dev nxc0
+        wait $CPID ;;
       restart)
         # The server process restarts (same keys) while the client pings it
         # every 100 ms; the client process keeps running.

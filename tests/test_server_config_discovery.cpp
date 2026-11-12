@@ -158,3 +158,19 @@ TEST_F(ConfigDiscovery, BooleanEnvironmentVariablesReadTheirValue) {
     ::unsetenv("SP_DDNS_ENABLED");
 }
 #endif
+
+TEST(ServerConfigJson, TransportBridgeSettingsAreRead) {
+    nexus::core::ServerConfig c;
+    nexus::core::from_json(nlohmann::json{{"transport_bridge", true},
+                                          {"transport_bridge_urls", {"wss://t.example/api/transport/ws/dataplane"}},
+                                          {"transport_bridge_max_connections", 64},
+                                          {"transport_bridge_max_per_ip", 200}},
+                           c);
+    EXPECT_TRUE(c.transport_bridge);
+    ASSERT_EQ(c.transport_bridge_urls.size(), 1u);
+    EXPECT_EQ(c.transport_bridge_max_connections, 64u);
+    EXPECT_EQ(c.transport_bridge_max_per_ip, 200u);
+    nexus::core::ServerConfig d;
+    EXPECT_EQ(d.transport_bridge_max_connections, 32u);
+    EXPECT_EQ(d.transport_bridge_max_per_ip, 4u);
+}
