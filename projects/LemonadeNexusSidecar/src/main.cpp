@@ -112,6 +112,7 @@ struct SidecarConfig {
     std::string link_token_out;                // after the join, mint an invite for this group and write it here (0600)
     std::vector<std::string> link_token_perms; // permissions that invite grants (default: the server's default set)
     std::string device_name;                   // name of this device's endpoint when the join creates it
+    std::vector<std::string> fallback_servers; // more "host:port" public APIs to try when `server` is down
 };
 
 std::optional<ExposeMapping> parse_expose(const std::string& spec) {
@@ -147,6 +148,8 @@ void apply_json_config(SidecarConfig& cfg, const nlohmann::json& j) {
     if (j.contains("catalog"))      cfg.catalog_path  = j.at("catalog").get<std::string>();
     if (j.contains("genesis_key"))  cfg.genesis_key   = j.at("genesis_key").get<std::string>();
     if (j.contains("device_name"))  cfg.device_name   = j.at("device_name").get<std::string>();
+    if (j.contains("fallback_servers") && j.at("fallback_servers").is_array())
+        cfg.fallback_servers = j.at("fallback_servers").get<std::vector<std::string>>();
     if (j.contains("mesh_port"))    cfg.mesh_port     = j.at("mesh_port").get<uint16_t>();
     if (j.contains("mesh_local"))   cfg.mesh_local    = j.at("mesh_local").get<std::string>();
     if (j.contains("mesh_selection")) cfg.mesh_selection = j.at("mesh_selection").get<std::string>();
@@ -348,6 +351,14 @@ int main(int argc, char* argv[]) {
     // on); pinning keeps the SDK on that FQDN instead of switching to the
     // server's advertised SEIP FQDN after join.
     sc.pin_server = cfg.pin_server;
+    // Fallback public APIs: the SDK's Tier 1 refresh asks only the servers in its pool, and the
+    // pool held just `server`, so a client whose server went away had nobody to ask (seen on the
+    // CESARops work Nexus 2026-11-12). Seed the pool with the others.
+    for (const auto& f : cfg.fallback_servers) {
+        if (auto c = f.rfind(':'); c != std::string::npos) {
+            sc.servers.push_back({f.substr(0, c), static_cast<uint16_t>(std::stoi(f.substr(c + 1))), cfg.use_tls});
+        }
+    }
     lnsdk::LemonadeNexusClient client{sc};
     client.set_identity(identity);
     if (!cfg.link_token.empty()) client.set_link_token(cfg.link_token);
@@ -598,6 +609,9 @@ int main(int argc, char* argv[]) {
                 // later re-join doesn't replay it.
                 client.set_link_token("");
 
+                // Learn every server GET /api/servers lists (with its announced port) so a
+                // later outage of the session server leaves others to fail over to.
+                client.discover_servers();
                 client.enable_mesh();  // background peer discovery + heartbeat
 
                 bool catalog_registered = false;
