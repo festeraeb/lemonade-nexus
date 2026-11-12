@@ -565,6 +565,54 @@ bool UserspaceDataplane::update_endpoint(const std::string& pubkey_b64,
     return true;
 }
 
+bool UserspaceDataplane::repoint_endpoint(const std::string& pubkey_b64,
+                                          const std::string& endpoint, bool pin) {
+    if (!running_) return false;
+    auto parsed = parse_endpoint(endpoint);
+    if (!parsed) return false;
+    PeerPtr peer = peer_by_pubkey(pubkey_b64);
+    if (!peer) return false;
+    peer->pinned.store(pin, std::memory_order_relaxed);
+    peer->endpoint.store(*parsed, std::memory_order_relaxed);
+
+    // An empty encapsulation is a keepalive on the current session. The
+    // input must be a valid pointer even at length zero (see drain_followups).
+    static constexpr uint8_t kEmpty[1] = {0};
+    std::vector<uint8_t> buf(wire::kMaxOverhead + 64);
+    auto r = wireguard_write(peer->tunn, kEmpty, 0, buf.data(), static_cast<uint32_t>(buf.size()));
+    if (r.op == WRITE_TO_NETWORK && r.size > 0) send_udp(buf.data(), r.size, *parsed);
+    return true;
+}
+
+void UserspaceDataplane::release_pin(const std::string& pubkey_b64) {
+    if (PeerPtr peer = peer_by_pubkey(pubkey_b64)) {
+        peer->pinned.store(false, std::memory_order_relaxed);
+    }
+}
+
+void UserspaceDataplane::note_authenticated(Peer& peer, uint64_t from_packed) {
+    peer.last_from.store(from_packed, std::memory_order_relaxed);
+    if (!peer.pinned.load(std::memory_order_relaxed)) {
+        peer.endpoint.store(from_packed, std::memory_order_relaxed);
+    }
+}
+
+std::optional<UserspaceDataplane::PeerPathInfo> UserspaceDataplane::peer_path_info(
+    const std::string& pubkey_b64) const {
+    PeerPtr peer = peer_by_pubkey(pubkey_b64);
+    if (!peer) return std::nullopt;
+    PeerPathInfo info;
+    info.endpoint = endpoint_to_string(peer->endpoint.load(std::memory_order_relaxed));
+    if (const auto from = peer->last_from.load(std::memory_order_relaxed); from != 0) {
+        info.last_rx_from = endpoint_to_string(from);
+    }
+    info.pinned = peer->pinned.load(std::memory_order_relaxed);
+    info.tunnel_index = peer->index;
+    info.rx_session = peer->rx_session.load(std::memory_order_relaxed);
+    info.handshakes = peer->handshakes.load(std::memory_order_relaxed);
+    return info;
+}
+
 bool UserspaceDataplane::probe_endpoint(const std::string& pubkey_b64,
                                         const std::string& endpoint) {
     return probe_endpoints(pubkey_b64, {endpoint}) == 1;
@@ -790,13 +838,19 @@ void UserspaceDataplane::handle_datagram(std::span<const uint8_t> pkt,
             // Valid handshake initiation/response — reply to where it came from
             // (authenticated by the Noise handshake itself).
             send_udp(scratch_a.data(), r.size, from_packed);
-            peer->endpoint.store(from_packed, std::memory_order_relaxed);
+            note_authenticated(*peer, from_packed);
+            if (*type == wire::MsgType::HandshakeInit || *type == wire::MsgType::HandshakeResponse) {
+                peer->handshakes.fetch_add(1, std::memory_order_relaxed);
+            }
             drain_followups(peer, from_packed, scratch_a, scratch_b);
             break;
 
         case WRITE_TO_TUNNEL_IPV4:
             // Authenticated transport data — roaming endpoint update.
-            peer->endpoint.store(from_packed, std::memory_order_relaxed);
+            note_authenticated(*peer, from_packed);
+            if (auto receiver = wire::receiver_index(pkt)) {
+                peer->rx_session.store(*receiver, std::memory_order_relaxed);
+            }
             peer->last_rx.store(static_cast<uint64_t>(std::time(nullptr)),
                                 std::memory_order_relaxed);
             route_decrypted({scratch_a.data(), r.size}, peer, scratch_b);
@@ -806,7 +860,10 @@ void UserspaceDataplane::handle_datagram(std::span<const uint8_t> pkt,
         case WIREGUARD_DONE:
             // For transport packets this means an authenticated keepalive.
             if (*type == wire::MsgType::TransportData) {
-                peer->endpoint.store(from_packed, std::memory_order_relaxed);
+                note_authenticated(*peer, from_packed);
+                if (auto receiver = wire::receiver_index(pkt)) {
+                    peer->rx_session.store(*receiver, std::memory_order_relaxed);
+                }
                 peer->last_rx.store(static_cast<uint64_t>(std::time(nullptr)),
                                     std::memory_order_relaxed);
             }

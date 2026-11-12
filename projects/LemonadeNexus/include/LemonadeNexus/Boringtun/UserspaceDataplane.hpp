@@ -27,6 +27,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <shared_mutex>
 #include <span>
 #include <string>
@@ -155,6 +156,54 @@ public:
     [[nodiscard]] bool update_endpoint(const std::string& pubkey_b64,
                                        const std::string& endpoint);
 
+    /// Move the peer to `endpoint` ("a.b.c.d:port") and keep its session:
+    /// no new handshake. Send one keepalive there at once, so the peer
+    /// roams to the new path on its first authenticated packet. Use it to
+    /// swap between two working paths of one peer (TransportMux). Without
+    /// a session, the keepalive becomes a handshake initiation, as any send
+    /// does.
+    ///
+    /// With `pin`, the peer stays at `endpoint` until release_pin(): an
+    /// authenticated packet from another address is still accepted but no
+    /// longer moves the peer there (no roaming). A path selector that owns
+    /// the choice of path pins it, so packets still in flight on the old
+    /// path do not pull the peer back. A handshake answer still goes to the
+    /// address the handshake came from.
+    ///
+    /// False when the dataplane is stopped, the peer is unknown, or the
+    /// endpoint does not parse. Thread-safe.
+    [[nodiscard]] bool repoint_endpoint(const std::string& pubkey_b64,
+                                        const std::string& endpoint, bool pin = false);
+
+    /// Let authenticated packets move the peer again (normal roaming).
+    /// No-op for an unknown peer. Thread-safe.
+    void release_pin(const std::string& pubkey_b64);
+
+    /// Path and session facts of one peer, for path selection and tests.
+    struct PeerPathInfo {
+        /// "a.b.c.d:port" the dataplane sends to now (empty when unknown).
+        std::string endpoint;
+        /// The source of the newest authenticated packet from the peer
+        /// (empty before the first). Differs from `endpoint` while the peer
+        /// is pinned and a packet came through another path.
+        std::string last_rx_from;
+        bool        pinned{false};
+        /// The 24-bit tunnel index of the peer's Noise state. It is fixed
+        /// for the life of the peer entry.
+        uint32_t tunnel_index{0};
+        /// Our receiver index of the newest authenticated transport packet
+        /// from the peer ((tunnel_index << 8) | session slot). A completed
+        /// handshake changes the slot; a path change does not. 0 before the
+        /// first transport packet.
+        uint32_t rx_session{0};
+        /// Handshakes completed with the peer since it was added (as
+        /// initiator or responder).
+        uint64_t handshakes{0};
+    };
+
+    /// nullopt when the peer is unknown. Thread-safe.
+    [[nodiscard]] std::optional<PeerPathInfo> peer_path_info(const std::string& pubkey_b64) const;
+
     /// Send a fresh handshake initiation for `pubkey_b64` to `endpoint`
     /// ("a.b.c.d:port") without changing the peer's stored endpoint. This is
     /// the hole-punch probe: the outbound packet opens this side's NAT
@@ -242,6 +291,12 @@ private:
         /// peer, data or keepalive; 0 = none yet. The liveness signal:
         /// keepalives do not renew the handshake.
         std::atomic<uint64_t> last_rx{0};
+        /// See PeerPathInfo::rx_session and PeerPathInfo::handshakes.
+        std::atomic<uint32_t> rx_session{0};
+        std::atomic<uint64_t> handshakes{0};
+        /// See repoint_endpoint(pin) and PeerPathInfo::last_rx_from.
+        std::atomic<bool>     pinned{false};
+        std::atomic<uint64_t> last_from{0};
         uint16_t         keepalive{25};
 
         // Identity-keyed routing-layer session: not in the IpRouter; decrypted
@@ -269,6 +324,10 @@ private:
     /// Encrypt `ip_pkt` for `dst` and send it to its current endpoint.
     bool encrypt_and_send(const PeerPtr& dst, std::span<const uint8_t> ip_pkt,
                           std::vector<uint8_t>& scratch);
+
+    /// Record an authenticated packet from `from_packed`: the peer roams
+    /// there unless it is pinned.
+    static void note_authenticated(Peer& peer, uint64_t from_packed);
 
     /// Drain queued follow-up output from a Tunn after a read/handshake.
     void drain_followups(const PeerPtr& peer, uint64_t to_packed,
