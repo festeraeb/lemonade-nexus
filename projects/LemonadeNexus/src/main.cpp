@@ -225,6 +225,8 @@ int main(int argc, char* argv[]) {
                  nexus::core::gossip_identity_protection_name(gossip_identity->protection));
 
     nexus::gossip::GossipService gossip{coordinator.io_context(), gossip_port, storage, crypto};
+
+    gossip.set_our_http_port(http_port);  // announced in ServerHello (listed by GET /api/servers)
     gossip.set_identity(gossip_identity->keypair);
     if (!config.root_pubkey.empty()) {
         auto root_pk_bytes = nexus::crypto::from_hex(config.root_pubkey);

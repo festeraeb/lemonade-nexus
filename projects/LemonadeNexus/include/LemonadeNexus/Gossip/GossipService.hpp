@@ -175,6 +175,10 @@ public:
     /// peers share it instead of the UDP source they happen to observe. Call
     /// before start().
     void set_our_advertised_endpoint(const std::string& ep) { our_advertised_endpoint_ = ep; }
+    /// The public API port this server listens on. Announced in ServerHello so
+    /// peers list it in GET /api/servers; without it every peer was listed with
+    /// the default 9100 and clients could not fail over to a server on another port.
+    void set_our_http_port(uint16_t port) { our_http_port_ = port; }
 
     /// Broadcast a backbone IPAM allocation delta to all peers.
     void broadcast_backbone_ipam_delta(const ipam::BackboneAllocationDelta& delta);
@@ -803,6 +807,8 @@ private:
     uint64_t                         our_backbone_claim_ts_{0};
     std::string                      our_mesh_pubkey_;   // base64 X25519
     std::string                      our_advertised_endpoint_;  // "ip:port" we are reachable at
+    uint16_t                         our_http_port_{0};          // 0 = not announced
+    uint32_t                         hello_refresh_ticks_{0};
 
     // Backbone transport. vnet_ is set once before the io loop runs; the
     // rest is touched only on the io thread except where noted.

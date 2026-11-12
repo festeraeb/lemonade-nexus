@@ -354,6 +354,7 @@ void GossipService::send_startup_server_hello() {
             if (!our_advertised_endpoint_.empty()) {
                 hello["advertised_endpoint"] = our_advertised_endpoint_;
             }
+            if (our_http_port_ != 0) hello["http_port"] = our_http_port_;
         }
         auto payload_str = hello.dump();
         std::vector<uint8_t> payload_bytes(payload_str.begin(), payload_str.end());
@@ -1816,10 +1817,14 @@ void GossipService::on_gossip_tick() {
     // identity guard in handle_server_hello.
     if (our_certificate_) {
         std::vector<std::string> pending;
+        // Every 12 ticks (about a minute) hello every peer, not only the ones that
+        // never answered, so a peer that restarted or missed our startup hello
+        // learns our API port (our_http_port_). A hello is idempotent at the receiver.
+        const bool refresh_all = our_http_port_ != 0 && (++hello_refresh_ticks_ % 12) == 0;
         {
             std::lock_guard lock(peers_mutex_);
             for (const auto& p : peers_) {
-                if (p.certificate_json.empty()) pending.push_back(p.endpoint);
+                if (p.certificate_json.empty() || refresh_all) pending.push_back(p.endpoint);
             }
         }
         if (!pending.empty()) {
@@ -1829,6 +1834,7 @@ void GossipService::on_gossip_tick() {
                 if (!our_region_.empty()) hello["region"] = our_region_;
                 if (!our_advertised_endpoint_.empty())
                     hello["advertised_endpoint"] = our_advertised_endpoint_;
+                if (our_http_port_ != 0) hello["http_port"] = our_http_port_;
             }
             auto hello_str = hello.dump();
             std::vector<uint8_t> hello_bytes(hello_str.begin(), hello_str.end());
@@ -2650,6 +2656,13 @@ void GossipService::handle_server_hello(const asio::ip::udp::endpoint& sender,
                 if (it != peers_.end()) it->pubkey = pk;
             }
 
+            // The API port the peer announces (signed packet, PoP checked above).
+            uint16_t announced_http_port = 0;
+            if (const auto hp_it = j.find("http_port");
+                hp_it != j.end() && hp_it->is_number_unsigned() &&
+                hp_it->get<uint64_t>() > 0 && hp_it->get<uint64_t>() <= 0xFFFF) {
+                announced_http_port = static_cast<uint16_t>(hp_it->get<uint64_t>());
+            }
             const auto advertised = j.value("advertised_endpoint", std::string{});
             // Cross-check the advertised endpoint against the UDP source we
             // actually observed. Only a match is "source-confirmed" and safe to
@@ -2659,6 +2672,7 @@ void GossipService::handle_server_hello(const asio::ip::udp::endpoint& sender,
             if (it != peers_.end()) {
                 it->certificate_json = j.dump();
                 it->region = j.value("region", "");
+                if (announced_http_port != 0) it->http_port = announced_http_port;
                 if (!advertised.empty()) {
                     // Tracked #6: an authenticated direct hello (PoP enforced
                     // above) refreshes a stale stored endpoint — otherwise a
@@ -2682,7 +2696,8 @@ void GossipService::handle_server_hello(const asio::ip::udp::endpoint& sender,
                 peer.advertised_endpoint = advertised;
                 peer.advertised_confirmed = advertised_confirmed;
                 peer.region             = j.value("region", "");
-                peer.http_port          = 9100; // will be updated via peer exchange
+                peer.http_port          = announced_http_port != 0 ? announced_http_port
+                                                                   : uint16_t{9100};
                 peer.last_seen          = static_cast<uint64_t>(
                     chrono::system_clock::to_time_t(chrono::system_clock::now()));
                 peer.reputation         = 1.0f;
