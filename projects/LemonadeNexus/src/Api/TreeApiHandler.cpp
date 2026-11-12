@@ -1,4 +1,5 @@
 #include <LemonadeNexus/Api/TreeApiHandler.hpp>
+#include <LemonadeNexus/Network/TransportBridge.hpp>
 #include <algorithm>
 #include <cctype>
 #include <map>
@@ -1089,6 +1090,9 @@ void TreeApiHandler::do_register_routes(httplib::Server& pub, httplib::Server& p
             {"dns_servers",      nlohmann::json::array({server_tunnel})},
         };
         if (membership) resp["membership"] = *membership;
+        if (ctx_.config.transport_bridge) {
+            resp["mesh_wss_path"] = std::string(network::kTransportBridgePathPrefix) + "dataplane";
+        }
         spdlog::info("[Join] node={} tunnel_ip={} mesh_endpoint={} private_fqdn={}",
                       node_id, alloc.base_network, mesh_endpoint, client_private_fqdn);
         json_response(res, resp);

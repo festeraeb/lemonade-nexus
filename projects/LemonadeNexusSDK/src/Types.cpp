@@ -253,6 +253,7 @@ void to_json(json& j, const MeshTunnelStatus& s) {
         {"peers",          s.peers},
         {"needs_rejoin",   s.needs_rejoin},
         {"tunnel_up",      s.tunnel_up},
+        {"server_path",    s.server_path},
     };
 }
 
@@ -265,6 +266,7 @@ void from_json(const json& j, MeshTunnelStatus& s) {
     s.total_tx_bytes = j.value("total_tx_bytes", uint64_t{0});
     s.needs_rejoin   = j.value("needs_rejoin", false);
     s.tunnel_up      = j.value("tunnel_up", false);
+    s.server_path    = j.value("server_path", "");
     if (j.contains("peers") && j["peers"].is_array()) {
         s.peers = j["peers"].get<std::vector<MeshPeer>>();
     }

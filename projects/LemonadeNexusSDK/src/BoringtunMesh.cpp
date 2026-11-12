@@ -1,4 +1,5 @@
 #include <LemonadeNexusSDK/BoringtunMesh.hpp>
+#include <LemonadeNexusSDK/TransportMux.hpp>
 #include <algorithm>
 
 #include <LemonadeNexus/Boringtun/IpRouter.hpp>
@@ -93,6 +94,13 @@ void mesh_output_trampoline(void* ctx, const uint8_t* pkt, size_t len) {
 
 struct BoringtunMesh::Impl {
     UserspaceDataplane dp;
+    // Path selection for the server peer (UDP or WSS), when the config names
+    // a WSS route. The receive threads read `mux_ptr`; the mux is destroyed
+    // only after the dataplane threads stopped (stop, suspend).
+    // `mux_mtx` guards `mux` against status readers on other threads.
+    std::mutex                    mux_mtx;
+    std::unique_ptr<TransportMux> mux;
+    std::atomic<TransportMux*>    mux_ptr{nullptr};
     std::string        server_pubkey;     // never removed by sync_peers
     std::atomic<bool>  active{false};
     BoringtunConfig    started_cfg;       // what the live plane was started with
@@ -183,7 +191,8 @@ bool BoringtunMesh::start(const BoringtunConfig& config) {
             live.tunnel_ip == config.tunnel_ip &&
             live.server_tunnel_ip == config.server_tunnel_ip &&
             live.server_public_key == config.server_public_key &&
-            live.server_endpoint == config.server_endpoint) {
+            live.server_endpoint == config.server_endpoint &&
+            live.wss_url == config.wss_url) {
             return true;
         }
         // A re-join issues a fresh mesh IP/keys. Keeping the old plane would
@@ -197,14 +206,23 @@ bool BoringtunMesh::start(const BoringtunConfig& config) {
     dpcfg.private_key_b64 = config.private_key;
     dpcfg.public_key_b64  = config.public_key;
     dpcfg.listen_port     = config.listen_port;  // 0 = random
+    if (!config.wss_url.empty()) {
+        // Paths swap under a live stream: size the netstack for the smallest
+        // rung (the 9103 relay's Data header on a 1500-byte link), so no
+        // move black-holes a packet that fit the old path.
+        dpcfg.mtu = pinned_mtu(1500, true, nexus::relay::kRelayHeaderSize, dpcfg.mtu);
+    }
 
     NsHandle* ns = ns_create(dpcfg.mtu, kTcpBufferBytes, &mesh_output_trampoline, &impl_->dp);
     if (!ns) return false;
 
     // dp.stop() joins the receive workers, so this handler never runs after
     // stop() destroys the netstack.
-    impl_->dp.set_inbound_handler([ns](std::span<const uint8_t> pkt) {
-        if (!pkt.empty()) ns_feed_inbound(ns, pkt.data(), pkt.size());
+    impl_->dp.set_inbound_handler([ns, impl = impl_.get()](std::span<const uint8_t> pkt) {
+        if (pkt.empty()) return;
+        // The mux's path probes end here; everything else goes to the stack.
+        if (auto* mux = impl->mux_ptr.load(); mux && mux->observe_inbound(pkt)) return;
+        ns_feed_inbound(ns, pkt.data(), pkt.size());
     });
     impl_->dp.set_stun_handler([impl = impl_.get()](std::span<const uint8_t> msg,
                                                     const std::string& from) {
@@ -252,6 +270,7 @@ bool BoringtunMesh::start(const BoringtunConfig& config) {
 
     impl_->started_cfg = config;
     impl_->active = true;
+    start_mux();
     spdlog::info("[BoringtunMesh] dataplane up: mesh_ip={}, server_peer={}…",
                  tunnel_addr,
                  impl_->server_pubkey.substr(0, std::min<size_t>(8, impl_->server_pubkey.size())));
@@ -265,7 +284,13 @@ void BoringtunMesh::stop() {
         impl_->relay_paths.clear();
         impl_->written_endpoints.clear();
     }
-    impl_->dp.stop();  // stop feeding the netstack before tearing it down
+    {
+        std::lock_guard lock(impl_->mux_mtx);
+        if (impl_->mux) impl_->mux->stop();
+        impl_->dp.stop();  // stop feeding the netstack before tearing it down
+        impl_->mux_ptr.store(nullptr);
+        impl_->mux.reset();
+    }
     NsHandle* ns = nullptr;
     {
         std::lock_guard lock(impl_->ns_mtx);
@@ -441,7 +466,15 @@ void close_all_egress_locked(NsHandle* ns,
 
 void BoringtunMesh::suspend() {
     if (!impl_->active.load()) return;
-    impl_->dp.suspend();
+    {
+        std::lock_guard lock(impl_->mux_mtx);
+        if (impl_->mux) impl_->mux->stop();
+        impl_->dp.suspend();
+        // The receive threads are stopped: the mux can go. rebind() starts
+        // a new one for the new socket.
+        impl_->mux_ptr.store(nullptr);
+        impl_->mux.reset();
+    }
     std::lock_guard lock(impl_->ns_mtx);
     close_all_egress_locked(impl_->ns, impl_->egress_cache);
 }
@@ -457,7 +490,28 @@ std::optional<std::size_t> BoringtunMesh::rebind() {
     }
     // The peers hold their sessions, but the path to each one changed with
     // the source port: a handshake from the new socket tells them so.
-    return rehandshake_all();
+    const auto sent = rehandshake_all();
+    start_mux();
+    return sent;
+}
+
+void BoringtunMesh::start_mux() {
+    std::lock_guard lock(impl_->mux_mtx);
+    if (impl_->mux) return;
+    const auto& cfg = impl_->started_cfg;
+    if (cfg.wss_url.empty() || impl_->server_pubkey.empty() || cfg.server_endpoint.empty()) return;
+    TransportMux::Options opts;
+    opts.peer_pubkey = impl_->server_pubkey;
+    opts.udp_endpoint = cfg.server_endpoint;
+    opts.wss.url = cfg.wss_url;
+    opts.own_ip = addr_part(cfg.tunnel_ip);
+    opts.peer_ip = cfg.server_tunnel_ip;
+    auto mux = std::make_unique<TransportMux>(impl_->dp, std::move(opts));
+    impl_->mux_ptr.store(mux.get());
+    impl_->mux = std::move(mux);
+    impl_->mux->start();
+    spdlog::info("[BoringtunMesh] server path: UDP {} with WSS fallback {}", cfg.server_endpoint,
+                 cfg.wss_url);
 }
 
 StatusResult BoringtunMesh::sync_peers(const std::vector<MeshPeer>& desired) {
@@ -698,6 +752,11 @@ StatusResult BoringtunMesh::remove_peer(const std::string& pubkey) {
     return result;
 }
 
+std::string BoringtunMesh::server_path() const {
+    std::lock_guard lock(impl_->mux_mtx);
+    return impl_->mux ? transport_path_name(impl_->mux->path()) : std::string{};
+}
+
 MeshTunnelStatus BoringtunMesh::mesh_status() const {
     MeshTunnelStatus ms;
     ms.is_up = impl_->active.load();
@@ -735,6 +794,7 @@ MeshTunnelStatus BoringtunMesh::mesh_status() const {
         ms.peers.push_back(std::move(mp));
     }
     ms.peer_count = static_cast<uint32_t>(ms.peers.size());
+    ms.server_path = server_path();
     // online_count is recomputed by MeshOrchestrator (it merges server last_seen).
     return ms;
 }

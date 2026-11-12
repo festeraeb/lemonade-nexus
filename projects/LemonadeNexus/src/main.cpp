@@ -26,6 +26,7 @@
 #include <LemonadeNexus/Gossip/ServerCertificate.hpp>
 #include <LemonadeNexus/IPAM/IPAMService.hpp>
 #include <LemonadeNexus/Network/StunService.hpp>
+#include <LemonadeNexus/Network/TransportBridge.hpp>
 #include <LemonadeNexus/Relay/RelayService.hpp>
 #include <LemonadeNexus/Relay/RelayDiscoveryService.hpp>
 #include <LemonadeNexus/Acme/AcmeService.hpp>
@@ -914,6 +915,19 @@ int main(int argc, char* argv[]) {
     // cert is still opened by path. Fail closed: while the DEK is locked the key
     // cannot be read, tls.valid stays false, and the HTTPS listener is withheld
     // (no plaintext interim) until the background ACME/upgrade path brings it up.
+    // Transport bridge: WebSocket routes on the public listener to the mesh
+    // transport port and the relay port, for clients whose network blocks
+    // UDP (TransportBridge.hpp). Off unless configured.
+    std::unique_ptr<nexus::network::TransportBridge> transport_bridge;
+    if (config.transport_bridge) {
+        transport_bridge = std::make_unique<nexus::network::TransportBridge>();
+        (void)transport_bridge->add_target("dataplane", udp_port);
+        (void)transport_bridge->add_target("relay", relay.local_port());
+        spdlog::info("Transport bridge: {}dataplane -> 127.0.0.1:{}, {}relay -> 127.0.0.1:{}",
+                     nexus::network::kTransportBridgePathPrefix, udp_port,
+                     nexus::network::kTransportBridgePathPrefix, relay.local_port());
+    }
+
     nexus::network::HttpServer http_server{http_port, "0.0.0.0"};
     if (tls.cert_path.empty()) {
         // No cert on disk yet — ACME background path will issue it and upgrade.
@@ -1611,6 +1625,7 @@ int main(int argc, char* argv[]) {
         onboard_api.register_routes(pub, priv);
         account_data_api.register_routes(pub, priv);
         tier1_api.register_routes(pub, priv);
+        if (transport_bridge) transport_bridge->register_routes(pub);
     };
     // Re-runnable if the underlying server object is replaced (plain->HTTPS
     // upgrade after a background ACME cert). Resolves the private server on every
@@ -1893,6 +1908,7 @@ int main(int argc, char* argv[]) {
         acme_renewal_thread.join();
     }
     if (forward_authorizer) forward_authorizer->stop();
+    if (transport_bridge) transport_bridge->stop();
     boringtun_service.stop();   // stops the dataplane: no more inbound packets
     vnet.stop();                // tears down the netstack + bridges
     if (private_http_server) {

@@ -408,6 +408,18 @@ public endpoints. They connect over the LAN instead:
 - `MeshPeer::path` (`path` in `ln_mesh_peers` and `ln_mesh_status`, and in
   the mesh port device status) says where the traffic goes: `"lan"`,
   `"direct"`, `"relay"`, or `""` (no working path yet).
+- `server_path` in `ln_mesh_status` says how the tunnel to the session
+  server runs when that server serves the transport bridge (its join answer
+  carries `mesh_wss_path`): `"direct"` (UDP), `"wss"` (a TLS WebSocket to the
+  server's public HTTPS listener, for networks that block UDP), or `"none"`
+  while neither is proved. It is empty when the server has no bridge. The
+  SDK races the two at start (UDP first; the WebSocket after 250 ms; the path
+  of the first completed Noise handshake wins, so a captive portal that
+  accepts TCP never wins), probes the tunnel every 100 ms, moves to the other
+  path after 400 ms without an answer, and tries UDP again 10 seconds after
+  a move. A move keeps the BoringTun session: no handshake runs and open TCP
+  streams continue. With the bridge, the netstack MTU is 1414 bytes, the
+  size the 9103 relay rung carries on a 1500-byte link.
 - A LAN path that gets no authenticated packet for the liveness window
   (three keepalive intervals plus 5 seconds) ends at the next monitor pass:
   the peer is probed again at every address and falls back to the public

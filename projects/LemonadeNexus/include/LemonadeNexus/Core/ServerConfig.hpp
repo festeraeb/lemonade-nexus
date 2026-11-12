@@ -78,6 +78,12 @@ struct ServerConfig {
     uint32_t    ddns_update_interval_sec{300};
     bool        ddns_enabled{false};
 
+    /// Serve the transport bridge (Network/TransportBridge.hpp) on the
+    /// public HTTPS listener: WebSocket routes to this server's mesh
+    /// transport port and relay port, for clients on networks that block
+    /// UDP. Default off.
+    bool        transport_bridge{false};
+
     // First-run CLI mode: initialize the data directory (identity + gossip
     // keypairs), print onboarding info (pubkeys, node ID, next steps), and exit.
     bool        first_run{false};

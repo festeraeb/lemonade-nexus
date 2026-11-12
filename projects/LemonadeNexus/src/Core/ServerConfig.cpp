@@ -151,6 +151,7 @@ void from_json(const json& j, ServerConfig& c) {
     if (j.contains("ddns_password"))              j.at("ddns_password").get_to(c.ddns_password);
     if (j.contains("ddns_update_interval_sec"))   j.at("ddns_update_interval_sec").get_to(c.ddns_update_interval_sec);
     if (j.contains("ddns_enabled"))               j.at("ddns_enabled").get_to(c.ddns_enabled);
+    if (j.contains("transport_bridge"))           j.at("transport_bridge").get_to(c.transport_bridge);
     if (j.contains("private_http_port"))          j.at("private_http_port").get_to(c.private_http_port);
     if (j.contains("onboard_request_ttl_sec"))   j.at("onboard_request_ttl_sec").get_to(c.onboard_request_ttl_sec);
     if (j.contains("onboard_max_pending"))       j.at("onboard_max_pending").get_to(c.onboard_max_pending);
@@ -340,6 +341,8 @@ ServerConfig load_config(int argc, char* argv[]) {
             config.ddns_password = argv[++i];
         } else if (std::strcmp(argv[i], "--ddns-enabled") == 0) {
             config.ddns_enabled = true;
+        } else if (std::strcmp(argv[i], "--transport-bridge") == 0) {
+            config.transport_bridge = true;
         } else if (std::strcmp(argv[i], "--github-releases-url") == 0 && i + 1 < argc) {
             config.github_releases_url = argv[++i];
         } else if (std::strcmp(argv[i], "--manifest-fetch-interval") == 0 && i + 1 < argc) {
@@ -451,6 +454,7 @@ ServerConfig load_config(int argc, char* argv[]) {
     if (const char* v = std::getenv("SP_DDNS_DOMAIN"))    config.ddns_domain   = v;
     if (const char* v = std::getenv("SP_DDNS_PASSWORD"))  config.ddns_password = v;
     read_env_bool("SP_DDNS_ENABLED", config.ddns_enabled, false);
+    read_env_bool("SP_TRANSPORT_BRIDGE", config.transport_bridge, false);
     if (const char* v = std::getenv("SP_GITHUB_RELEASES_URL"))  config.github_releases_url       = v;
     if (const char* v = std::getenv("SP_MANIFEST_FETCH_INTERVAL")) config.manifest_fetch_interval_sec = static_cast<uint32_t>(std::atoi(v));
     if (const char* v = std::getenv("SP_MINIMUM_VERSION"))      config.minimum_version           = v;

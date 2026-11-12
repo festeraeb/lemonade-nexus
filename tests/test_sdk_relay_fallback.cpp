@@ -5,10 +5,12 @@
 #include <LemonadeNexus/Relay/RelayService.hpp>
 #include <LemonadeNexus/Relay/RelayTicketAuth.hpp>
 #include <LemonadeNexus/Relay/RelayWire.hpp>
+#include <LemonadeNexus/Network/TransportBridge.hpp>
 
 #include <LemonadeNexusSDK/BoringtunMesh.hpp>
 #include <LemonadeNexusSDK/RelayChannel.hpp>
 #include <LemonadeNexusSDK/RelayFallback.hpp>
+#include <LemonadeNexusSDK/WssTunnel.hpp>
 
 #include <asio.hpp>
 #include <gtest/gtest.h>
@@ -311,6 +313,73 @@ TEST_F(SdkRelayFallbackTest, ChannelsCarryTheDataplaneThroughTheRelay) {
     alice_channel.close();
     bob_channel.close();
     EXPECT_TRUE(eventually([&] { return r->session_count() == 0; }, [] {}, 2s));
+}
+
+// The TCP 443 rung for a relayed peer: Bob's side of the relay session goes
+// through a WebSocket to the transport bridge's relay route, Alice's side is
+// plain UDP. The relay pairs them with its normal rendezvous and forwards
+// exactly as for two UDP sides; RelayChannel is unchanged (the tunnel's
+// local endpoint is its relay address).
+TEST_F(SdkRelayFallbackTest, ARelaySideOverTheWebSocketBridgePairsWithAUdpSide) {
+    network::TransportBridge bridge;
+    ASSERT_TRUE(bridge.add_target("relay", r->local_port()));
+    httplib::Server listener;
+    bridge.register_routes(listener);
+    const int port = listener.bind_to_any_port("127.0.0.1");
+    ASSERT_GT(port, 0);
+    std::thread serve([&] { listener.listen_after_bind(); });
+    listener.wait_until_ready();
+
+    lnsdk::WssTunnel tunnel;
+    lnsdk::WssTunnel::Options topts;
+    topts.url = "ws://127.0.0.1:" + std::to_string(port) + network::kTransportBridgePathPrefix + "relay";
+    ASSERT_TRUE(tunnel.open(topts));
+    ASSERT_TRUE(eventually([&] { return tunnel.state() == lnsdk::WssTunnel::State::Open; }, [] {}, 5s));
+
+    const auto window = relay::relay_rendezvous_window(now_s());
+    const auto open = [&](lnsdk::BoringtunMesh& self, const std::string& peer_key,
+                          const std::string& holder, uint16_t relay_port,
+                          lnsdk::RelayChannel& channel) {
+        const auto rv = self.relay_rendezvous(peer_key, "relay-1", window);
+        ASSERT_TRUE(rv.has_value());
+        lnsdk::RelayChannel::Options options;
+        options.relay_ipv4 = "127.0.0.1";
+        options.relay_port = relay_port;
+        options.dataplane_port = self.bound_port();
+        options.allocate = lnsdk::relay_allocate_datagram(*rv, sdk_ticket(holder, "relay-1"), 1);
+        options.allocate_retry = 200ms;
+        ASSERT_TRUE(channel.open(std::move(options)));
+    };
+    lnsdk::RelayChannel alice_channel, bob_channel;
+    open(alice, bob_keys.second, "alice", r->local_port(), alice_channel);
+    open(bob, alice_keys.second, "bob", tunnel.local_port(), bob_channel);
+
+    ASSERT_TRUE(eventually(
+        [&] {
+            return alice_channel.state() == lnsdk::RelayChannel::State::Paired &&
+                   bob_channel.state() == lnsdk::RelayChannel::State::Paired;
+        },
+        [] {}, 5s));
+    ASSERT_TRUE(alice.set_peer_relay(bob_keys.second, alice_channel.local_endpoint(),
+                                     alice_channel.relay_endpoint()));
+    ASSERT_TRUE(bob.set_peer_relay(alice_keys.second, bob_channel.local_endpoint(),
+                                   bob_channel.relay_endpoint()));
+
+    EXPECT_EQ(ping_over_mesh(bob, "10.64.0.2"), "pong-through-relay");
+    EXPECT_EQ(r->session_count(), 1u);
+    EXPECT_EQ(r->paired_session_count(), 1u);
+    // Bob's datagrams crossed the bridge, one message each.
+    EXPECT_GT(bridge.counters().datagrams_up, 2u);
+    EXPECT_GT(bridge.counters().datagrams_down, 2u);
+    EXPECT_GE(tunnel.counters().datagrams_up, bridge.counters().datagrams_up);
+
+    alice_channel.close();
+    bob_channel.close();
+    EXPECT_TRUE(eventually([&] { return r->session_count() == 0; }, [] {}, 2s));
+    tunnel.close();
+    bridge.stop();
+    listener.stop();
+    serve.join();
 }
 
 TEST_F(SdkRelayFallbackTest, FallbackMovesUnreachablePeersOntoTheRelay) {

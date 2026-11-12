@@ -168,6 +168,22 @@ listener in place. There is no plaintext fallback.
 | `--ddns-password <pw>` | `SP_DDNS_PASSWORD` | `ddns_password` | | DDNS password |
 | `--ddns-enabled` | `SP_DDNS_ENABLED=1` | `ddns_enabled` | `false` | Enable dynamic DNS updates |
 
+## Transport Bridge
+
+| CLI Flag | Env Var | JSON Key | Default | Description |
+|----------|---------|----------|---------|-------------|
+| `--transport-bridge` | `SP_TRANSPORT_BRIDGE=1` | `transport_bridge` | `false` | Serve WebSocket routes to the mesh transport port and the relay port on the public HTTPS listener |
+
+With the bridge on, `GET /api/transport/ws/dataplane` and
+`GET /api/transport/ws/relay` upgrade to a WebSocket on the public HTTPS
+listener (`http_port`). Each binary message is one datagram to or from
+`127.0.0.1:<udp_port>` or `127.0.0.1:<relay_port>`. The bridge never decrypts:
+the mesh session authenticates and encrypts every datagram end to end. The
+join answer then carries `mesh_wss_path`, and an SDK client uses the route as
+a fallback path when UDP to the server fails (TransportMux). For networks that
+permit only outbound 443, the public listener must be reachable on TCP 443
+(set `http_port` to 443, or map 443 to it).
+
 Release manifest fetching (`SP_GITHUB_RELEASES_URL`,
 `SP_MANIFEST_FETCH_INTERVAL`, `SP_MINIMUM_VERSION`) controls how the server
 checks for signed manifests of other versions.

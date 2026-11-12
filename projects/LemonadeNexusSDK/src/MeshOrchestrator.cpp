@@ -191,6 +191,7 @@ MeshTunnelStatus MeshOrchestrator::status() const {
     auto status = last_status_;
     status.tunnel_up = running_.load() && seen &&
                        tunnel_alive(*seen, now_unix, std::chrono::steady_clock::now() - started_at_);
+    status.server_path = mesh_.server_path();
     return status;
 }
 

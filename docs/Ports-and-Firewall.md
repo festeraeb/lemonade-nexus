@@ -41,6 +41,12 @@ Notes:
 - **`53` is only for nodes that serve public authoritative DNS.** Map both
   UDP and TCP; a UDP-only authoritative server fails truncated responses.
   Do not expose public DNS from a node that does not serve it.
+- **The transport bridge needs no extra port.** With `transport_bridge`
+  on, the public HTTPS listener (`9100`) also serves WebSocket routes to
+  the mesh transport port and the relay port, for clients on networks that
+  block UDP. For networks that permit only outbound `443`, make the public
+  listener reachable on `443/tcp` (set `http_port` to `443`, or forward
+  `443` to it).
 - `9100/tcp`, `51940/udp`, `3478/udp`, and `9103/udp` must accept any
   source — clients connect from unknown IPs. Clients query STUN (`3478`) to
   learn the address that peers punch toward, and fall back to the relay

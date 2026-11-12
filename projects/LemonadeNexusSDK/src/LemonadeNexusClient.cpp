@@ -3393,6 +3393,16 @@ Result<JoinResult> LemonadeNexusClient::join_network(const std::string& username
         bt.server_public_key = resp->value("mesh_server_pubkey", std::string{});
         bt.server_endpoint   = resp->value("mesh_endpoint", std::string{});
         bt.allowed_ips       = {resp->value("tunnel_subnet", std::string{"10.64.0.0/10"})};
+        // A server with the transport bridge names its route; the mesh then
+        // keeps a TLS WebSocket path to the server for networks that block
+        // UDP. It is the same host and port as the public API.
+        if (const auto wss_path = resp->value("mesh_wss_path", std::string{});
+            !wss_path.empty() && wss_path.front() == '/') {
+            const auto target = impl_->current_target();
+            if (!target.host.empty() && target.port != 0) {
+                bt.wss_url = "wss://" + target.host + ":" + std::to_string(target.port) + wss_path;
+            }
+        }
 
         {
             std::lock_guard lock(impl_->mutex);

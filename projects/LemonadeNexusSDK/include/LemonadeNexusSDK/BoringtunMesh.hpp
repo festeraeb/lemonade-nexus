@@ -219,6 +219,11 @@ public:
     /// Remove a single mesh peer (the server peer is never removed).
     StatusResult remove_peer(const std::string& pubkey);
 
+    /// The path to the session server: "direct", "wss", or "none" while the
+    /// race runs; empty when the config names no WSS route (wss_url).
+    /// Thread-safe.
+    [[nodiscard]] std::string server_path() const;
+
     /// Live mesh status built from the dataplane's peer snapshot. A relayed
     /// peer has an empty `endpoint` and its relay in `relay_endpoint`. A peer
     /// with a relay path whose traffic now arrives from another address (an
@@ -244,6 +249,10 @@ public:
         std::span<const uint8_t> ed25519_secret_key);
 
 private:
+    /// Start the server peer's TransportMux when the config names a WSS
+    /// route. Called by start() and rebind().
+    void start_mux();
+
     struct Impl;
     std::unique_ptr<Impl> impl_;
 };
