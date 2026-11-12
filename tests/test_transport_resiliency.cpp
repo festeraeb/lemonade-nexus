@@ -1523,3 +1523,26 @@ TEST(MuxPolicyBackoff, BothRungsDeadBacksOffTheMoves) {
     p.on_reply(p.active(), t0 + 20001ms);
     EXPECT_EQ(p.dead_streak(), 0u);
 }
+
+// After a network change (the host calls resume, which kicks the mux) the
+// WSS standby is replaced at once: the old tunnel may be bound to an address
+// the device no longer has.
+TEST(TransportMuxKick, AKickReplacesTheWssStandbyAtOnce) {
+    ASSERT_GE(sodium_init(), 0);
+    MeshPair mesh([](httplib::Server&) {});
+    BridgeServer srv({{"dataplane", mesh.server_dp.bound_port()}});
+    ASSERT_TRUE(srv.ok());
+    TransportMux mux(mesh.client_dp, mesh.mux_options(srv.tunnel_options("dataplane")));
+    mesh.mux.store(&mux);
+    ASSERT_EQ(mux.establish(), TransportPath::Udp);
+    mux.start();
+    ASSERT_TRUE(wait_for([&] { return !mux.wss_endpoint().empty(); }, 5s));
+    const auto before = mux.wss_endpoint();
+    const auto accepted = srv.bridge().counters().connections_accepted;
+    mux.kick();
+    EXPECT_TRUE(wait_for(
+        [&] { return !mux.wss_endpoint().empty() && mux.wss_endpoint() != before; }, 3s));
+    EXPECT_TRUE(wait_for([&] { return srv.bridge().counters().connections_accepted > accepted; }, 3s));
+    EXPECT_EQ(mux.path(), TransportPath::Udp);
+    mux.stop();
+}

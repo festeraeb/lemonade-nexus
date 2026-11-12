@@ -101,10 +101,23 @@ for sc in "$@"; do
         sleep 15; snap settled
         ip netns exec $NC curl -s --cacert "$D/cert.pem" https://10.99.0.2/api/health >> "$D/client.jsonl"; echo >> "$D/client.jsonl"
         kill -0 $SPID && echo '{"event":"server_alive"}' >> "$D/client.jsonl" ;;
+      capture-udp|capture-wss)
+        # Record the server link while a stream and an upload cross it, then
+        # look for the plaintext (the upload body is 'u' repeated).
+        [ "$sc" = capture-wss ] && udp_drop_on
+        ip netns exec $NS tcpdump -i nxs0 -s 0 -w "$D/link.pcap" -U 2>/dev/null &
+        TPID=$!; sleep 1
+        run_client "$D" --stream-sec 5 --upload-mib 4
+        sleep 1; kill $TPID; wait $TPID 2>/dev/null
+        echo "{\"event\":\"capture\",\"bytes\":$(stat -c %s "$D/link.pcap"),\"plaintext_upload_runs\":$(grep -c -a 'uuuuuuuuuuuuuuuuuuuuuuuuuuuuuuuu' "$D/link.pcap"),\"plaintext_stream\":$(grep -c -a 'data: [0-9]' "$D/link.pcap"),\"plaintext_pong\":$(grep -c -a 'pong' "$D/link.pcap")}" >> "$D/client.jsonl"
+        rm -f "$D/link.pcap" ;;
       ipchange)
         # The client's address changes mid-stream (Wi-Fi to cellular): the
         # old address goes away and a new one comes up; the client process
         # gets no notice. A /ping every 100 ms shows the outage.
+        # Keep the new address when the old primary goes (Linux removes
+        # secondaries with their primary otherwise).
+        ip netns exec $NC sysctl -qw net.ipv4.conf.nxc0.promote_secondaries=1
         run_client "$D" --stream-sec 0 --upload-mib 0 --ping-watch-sec 40 &
         CPID=$!
         sleep 12; echo "ipchange $(date +%s.%N)" >> "$D/events"

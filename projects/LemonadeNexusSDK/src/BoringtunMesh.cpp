@@ -496,6 +496,11 @@ std::optional<int64_t> BoringtunMesh::server_peer_seen() const {
 }
 
 std::size_t BoringtunMesh::rehandshake_all() {
+    {
+        // The path to the server may have changed with the network.
+        std::lock_guard lock(impl_->mux_mtx);
+        if (impl_->mux) impl_->mux->kick();
+    }
     if (!impl_->active.load()) return 0;
     std::size_t sent = 0;
     for (const auto& peer : impl_->dp.snapshot_peers()) {

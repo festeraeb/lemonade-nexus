@@ -345,7 +345,20 @@ struct TransportMux::Impl {
         }
         switch (action) {
             case A::MoveToWss: move(TransportPath::Wss, true); break;
-            case A::MoveToUdp: move(TransportPath::Udp, true); break;
+            case A::MoveToUdp:
+                move(TransportPath::Udp, true);
+                // The WebSocket gave no reply although its connection looks
+                // open: it may be bound to an address this device no longer
+                // has (a network change), and only the ping timeout would
+                // say so, seconds later. Replace it now.
+                if (tunnel) {
+                    tunnel->close();
+                    tunnel.reset();
+                    wss_ep.clear();
+                    stats.wss_url.clear();
+                    next_wss_open = now;
+                }
+                break;
             case A::TryUdp:
                 ++stats.trials;
                 move(TransportPath::Udp, false);
@@ -476,6 +489,22 @@ void TransportMux::stop() {
         impl_->tunnel->close();
         impl_->tunnel.reset();
     }
+}
+
+void TransportMux::kick() {
+    std::lock_guard lock(impl_->mtx);
+    impl_->wss_backoff = impl_->opts.wss_reopen_min;
+    impl_->route_failures = 0;
+    impl_->next_wss_open = Clock::now();
+    if (impl_->tunnel) {
+        // A tunnel from before the change may be bound to a gone address.
+        impl_->tunnel->close();
+        impl_->tunnel.reset();
+        impl_->wss_ep.clear();
+        impl_->stats.wss_url.clear();
+    }
+    impl_->policy.reset_dead_streak();
+    (void)impl_->dp.probe_endpoints(impl_->opts.peer_pubkey, {impl_->opts.udp_endpoint});
 }
 
 bool TransportMux::observe_inbound(std::span<const uint8_t> p) {

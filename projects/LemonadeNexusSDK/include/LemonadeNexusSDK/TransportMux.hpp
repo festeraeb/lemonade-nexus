@@ -117,6 +117,7 @@ public:
     /// further move waits twice as long (up to 16 x dead_after), and the mux
     /// starts a new handshake on both rungs.
     [[nodiscard]] uint32_t dead_streak() const { return dead_streak_; }
+    void reset_dead_streak() { dead_streak_ = 0; }
     [[nodiscard]] bool          trying() const { return trial_; }
     [[nodiscard]] Clock::time_point last_move() const { return last_move_; }
     [[nodiscard]] const Timing& timing() const { return timing_; }
@@ -216,6 +217,12 @@ public:
     /// Stop the thread and close the WSS tunnel. The peer stays at the
     /// endpoint it has. Idempotent.
     void stop();
+
+    /// The network may have changed (the host resumed, or the OS reported a
+    /// new network): forget the WSS reopen backoff and the dead streak, open
+    /// a fresh WSS tunnel at once, and send a handshake initiation on every
+    /// rung. Thread-safe.
+    void kick();
 
     /// Offer one decrypted inbound IP packet. True when it is a reply to
     /// this mux's probe, which the caller must then not deliver further.
