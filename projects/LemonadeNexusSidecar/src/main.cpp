@@ -114,6 +114,7 @@ struct SidecarConfig {
     std::string device_name;                   // name of this device's endpoint when the join creates it
     std::vector<std::string> fallback_servers; // more "host:port" public APIs to try when `server` is down
     bool        leave{false};                  // one-shot: sign in, delete this device's node, exit
+    int         leave_after_sec{0};            // with leave: run the mesh this long first (a live check)
 };
 
 std::optional<ExposeMapping> parse_expose(const std::string& spec) {
@@ -150,6 +151,7 @@ void apply_json_config(SidecarConfig& cfg, const nlohmann::json& j) {
     if (j.contains("genesis_key"))  cfg.genesis_key   = j.at("genesis_key").get<std::string>();
     if (j.contains("device_name"))  cfg.device_name   = j.at("device_name").get<std::string>();
     if (j.contains("leave"))        cfg.leave         = j.at("leave").get<bool>();
+    if (j.contains("leave_after_sec")) cfg.leave_after_sec = j.at("leave_after_sec").get<int>();
     if (j.contains("fallback_servers") && j.at("fallback_servers").is_array())
         cfg.fallback_servers = j.at("fallback_servers").get<std::vector<std::string>>();
     if (j.contains("mesh_port"))    cfg.mesh_port     = j.at("mesh_port").get<uint16_t>();
@@ -622,6 +624,14 @@ int main(int argc, char* argv[]) {
                     // reply ("did not reach the server") usually means it worked; check the
                     // server's device count. Retrying would sign in again and, with the node
                     // gone, create a new device.
+                    if (cfg.leave_after_sec > 0) {
+                        client.enable_mesh();
+                        std::this_thread::sleep_for(std::chrono::seconds(cfg.leave_after_sec));
+                        const auto ms = client.mesh_status();
+                        spdlog::info("Before leaving: tunnel_up={} server_path='{}' needs_rejoin={} "
+                                     "rx={} tx={}", ms.tunnel_up, ms.server_path, ms.needs_rejoin,
+                                     ms.total_rx_bytes, ms.total_tx_bytes);
+                    }
                     auto left = client.leave_network();
                     if (left.ok) spdlog::info("Left the network: device node {} deleted", res.value.node_id);
                     else spdlog::warn("leave_network: {} (the delete is often applied anyway)", left.error);
